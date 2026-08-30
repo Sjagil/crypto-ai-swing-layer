@@ -1,0 +1,14 @@
+schema: crypto_ai_swing_proactive_v1
+markets: [BTC-EUR, ETH-EUR, SOL-EUR]
+interval_seconds: 60
+candle_limit: 600
+shadow_equity_eur: 10000
+state_path: output/crypto_ai_swing/proactive/state.sqlite
+closed_candles_only: true
+manage_exits_every_cycle: true
+nlp_every_cycle: true
+
+account:
+  use_private_balances_in_shadow: false
+  use_private_balances_in_paper: false
+  require_private_balances_in_live: true
