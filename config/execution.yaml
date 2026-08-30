@@ -1,9 +1,9 @@
-schema: crypto_ai_swing_execution_v1
+schema: crypto_ai_swing_execution_v2
 
 authority:
   default_mode: shadow
   strategy_direct_exchange_calls: false
-  broker_submission_enabled: false
+  broker_submission_enabled: true
   automatic_live_promotion: false
   withdrawals_enabled: false
 
@@ -31,3 +31,9 @@ execution:
   live_enabled: false
   intent_ttl_seconds: 120
   external_adapter_command: []
+
+execution_adapter:
+  mode: direct_bitvavo
+  intent_directory: output/crypto_ai_swing/trade_intents
+  command: []
+  live_command: []

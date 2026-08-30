@@ -12,6 +12,9 @@ from rich.table import Table
 from .settings import Settings
 from .bridge.discovery import write_report
 from .orchestration.pipeline import SwingPipeline
+from .orchestration.proactive import ProactiveTrader
+from .execution.bitvavo import live_gate_status
+from .nlp.engine import NLPMarketEngine
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -118,6 +121,50 @@ def shadow(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     console.print(f"Wrote {out}")
+
+
+@app.command("live-preflight")
+def live_preflight() -> None:
+    """Check live gates without placing an order."""
+    s = _settings()
+    status = live_gate_status(s.execution)
+    console.print(json.dumps({"ready": status.ready, "blockers": list(status.blockers)}, indent=2))
+
+
+@app.command()
+def nlp(text: str) -> None:
+    """Analyze one text with FinBERT when available, deterministic fallback otherwise."""
+    s = _settings()
+    assessment = NLPMarketEngine(s.nlp).assess_text(text)
+    console.print(json.dumps({
+        "score": assessment.score,
+        "confidence": assessment.confidence,
+        "severe_negative": assessment.severe_negative,
+        "event_tags": list(assessment.event_tags),
+        "assets": list(assessment.assets),
+        "model": assessment.model,
+    }, indent=2))
+
+
+@app.command()
+def proactive(
+    mode: str = typer.Option("shadow", help="shadow, paper, or live"),
+    once: bool = typer.Option(False, help="Run one cycle and exit"),
+    interval_seconds: int = typer.Option(60, min=10),
+) -> None:
+    """Continuously scan, score NLP, create intents, trade, and manage exits."""
+    if mode not in {"shadow", "paper", "live"}:
+        raise typer.BadParameter("mode must be shadow, paper, or live")
+    s = _settings()
+    trader = ProactiveTrader(s, mode=mode)
+    try:
+        if once:
+            console.print_json(json.dumps(trader.cycle(), default=str))
+        else:
+            console.print(f"Starting proactive runtime in {mode.upper()} mode")
+            trader.run_forever(interval_seconds=interval_seconds)
+    finally:
+        trader.close()
 
 
 if __name__ == "__main__":

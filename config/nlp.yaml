@@ -1,0 +1,15 @@
+schema: crypto_ai_swing_nlp_v1
+enabled: true
+model: ProsusAI/finbert
+transformer_enabled: true
+half_life_hours: 12
+maximum_age_hours: 72
+maximum_score_adjustment: 0.12
+severe_negative_veto: true
+rss_urls: []
+asset_aliases:
+  BTC: [bitcoin, btc]
+  ETH: [ethereum, ether, eth]
+  SOL: [solana, sol]
+  TAO: [bittensor, tao]
+  LINK: [chainlink, link]

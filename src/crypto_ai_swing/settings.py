@@ -12,6 +12,8 @@ except Exception:
 
 
 def load_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     return data or {}
@@ -30,6 +32,8 @@ class Settings:
     integrations: dict
     data_quality: dict
     compliance: dict
+    nlp: dict
+    proactive: dict
 
     @classmethod
     def load(cls, project_root: Path | None = None) -> "Settings":
@@ -52,4 +56,6 @@ class Settings:
             integrations=load_yaml(cfg / "integrations.yaml"),
             data_quality=load_yaml(cfg / "data_quality.yaml"),
             compliance=load_yaml(cfg / "compliance.yaml"),
+            nlp=load_yaml(cfg / "nlp.yaml"),
+            proactive=load_yaml(cfg / "proactive.yaml"),
         )

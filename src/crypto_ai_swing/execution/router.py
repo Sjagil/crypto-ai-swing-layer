@@ -7,7 +7,8 @@ import json
 import os
 import subprocess
 
-from crypto_ai_swing.contracts import Authority, TradeIntent
+from crypto_ai_swing.contracts import Authority, Side, TradeIntent
+from crypto_ai_swing.execution.bitvavo import BitvavoREST, live_gate_status
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class RouteResult:
     path: Path | None = None
     return_code: int | None = None
     blocker: str | None = None
+    response: dict | None = None
 
 
 class ExecutionRouter:
@@ -26,10 +28,7 @@ class ExecutionRouter:
         self.config = config
 
     def _intent_dir(self) -> Path:
-        rel = (
-            self.config.get("execution_adapter", {})
-            .get("intent_directory", "output/crypto_ai_swing/trade_intents")
-        )
+        rel = self.config.get("execution_adapter", {}).get("intent_directory", "output/crypto_ai_swing/trade_intents")
         return self.crypto_repo_root / rel
 
     def write_intent(self, intent: TradeIntent) -> Path:
@@ -43,14 +42,12 @@ class ExecutionRouter:
         now = datetime.now(timezone.utc)
         if intent.expires_at <= now:
             return RouteResult(False, mode, blocker="INTENT_EXPIRED")
-
         path = self.write_intent(intent)
         if mode == "shadow":
             return RouteResult(True, mode, path=path)
 
         execution = self.config.get("execution", {})
         adapter = self.config.get("execution_adapter", {})
-
         if mode == "paper":
             if not execution.get("paper_enabled", True):
                 return RouteResult(False, mode, path=path, blocker="PAPER_DISABLED")
@@ -60,21 +57,21 @@ class ExecutionRouter:
                 return RouteResult(False, mode, path=path, blocker="INTENT_NOT_LIVE")
             if not execution.get("live_enabled", False):
                 return RouteResult(False, mode, path=path, blocker="LIVE_DISABLED")
-            if os.getenv("CRYPTO_SWING_LIVE_ACK") != "I_UNDERSTAND":
-                return RouteResult(False, mode, path=path, blocker="LIVE_ACK_MISSING")
+            gate = live_gate_status(self.config)
+            if not gate.ready:
+                return RouteResult(False, mode, path=path, blocker=";".join(gate.blockers))
+            if str(adapter.get("mode", "file_contract")) == "direct_bitvavo":
+                if intent.side != Side.BUY:
+                    return RouteResult(False, mode, path=path, blocker="DIRECT_ROUTER_BUY_ONLY")
+                with BitvavoREST() as client:
+                    response = client.place_market_buy(intent.market, intent.notional_eur, intent.intent_id)
+                return RouteResult(True, mode, path=path, response=response)
             command = adapter.get("live_command", [])
         else:
             return RouteResult(False, mode, path=path, blocker="UNKNOWN_MODE")
 
         if not command:
             return RouteResult(False, mode, path=path, blocker="EXTERNAL_ADAPTER_NOT_CONFIGURED")
-
         rendered = [str(token).replace("{intent}", str(path)) for token in command]
-        proc = subprocess.run(
-            rendered,
-            cwd=self.crypto_repo_root,
-            shell=False,
-            check=False,
-            timeout=120,
-        )
+        proc = subprocess.run(rendered, cwd=self.crypto_repo_root, shell=False, check=False, timeout=120)
         return RouteResult(proc.returncode == 0, mode, path=path, return_code=proc.returncode)

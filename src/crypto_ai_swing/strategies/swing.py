@@ -13,14 +13,12 @@ def deterministic_score(row: pd.Series) -> tuple[float, str]:
         + 0.35 * float(row.get("trend_20_50", 0.0) > 0)
         + 0.20 * float(row.get("trend_50_200", 0.0) > 0)
     )
-
     rsi = float(row.get("rsi_14", np.nan))
     pullback = 1.0 if np.isfinite(rsi) and 42 <= rsi <= 68 else 0.35
     momentum = np.tanh(max(-0.1, min(0.1, float(row.get("ret_8", 0.0)))) * 10)
     momentum = (momentum + 1.0) / 2.0
     breakout = 1.0 if float(row.get("breakout_20", -1.0)) > 0 else 0.4
     volume = min(1.0, max(0.0, 0.5 + float(row.get("volume_z_48", 0.0)) / 6.0))
-
     score = 0.35 * trend + 0.20 * pullback + 0.20 * momentum + 0.15 * breakout + 0.10 * volume
     family = "BREAKOUT_RETEST" if breakout > 0.8 else "TREND_PULLBACK"
     return float(np.clip(score, 0.0, 1.0)), family
@@ -33,6 +31,9 @@ def build_signal(
     ml_probability: float | None = None,
     forecast_score: float | None = None,
     rl_score: float | None = None,
+    nlp_score: float | None = None,
+    nlp_confidence: float | None = None,
+    nlp_severe_negative: bool = False,
     minimum_entry_score: float = 0.62,
 ) -> Signal:
     dscore, family = deterministic_score(row)
@@ -54,8 +55,16 @@ def build_signal(
         weight += 0.10
 
     score = float(np.clip(weighted / max(weight, 1e-9), 0.0, 1.0))
-    side = Side.BUY if score >= minimum_entry_score else Side.HOLD
 
+    # NLP is bounded context. It cannot create an entry on its own.
+    if nlp_score is not None and np.isfinite(nlp_score):
+        conf = float(np.clip(nlp_confidence if nlp_confidence is not None else 0.5, 0.0, 1.0))
+        normalized = float(np.clip((float(nlp_score) + 1.0) / 2.0, 0.0, 1.0))
+        votes.append(ModelVote("nlp_context", normalized, conf))
+        adjustment = float(np.clip(float(nlp_score) * conf * 0.12, -0.12, 0.12))
+        score = float(np.clip(score + adjustment, 0.0, 1.0))
+
+    side = Side.BUY if score >= minimum_entry_score and not nlp_severe_negative else Side.HOLD
     atr_pct = max(0.005, float(row.get("atr_pct", 0.02)))
     stop_pct = float(np.clip(1.8 * atr_pct, 0.008, 0.08))
     take_profit_pct = float(np.clip(3.0 * stop_pct, 0.025, 0.24))
@@ -76,7 +85,7 @@ def build_signal(
         votes=tuple(votes),
         features={
             k: float(row[k])
-            for k in ("atr_pct", "rsi_14", "ret_8", "trend_20_50", "breakout_20")
+            for k in ("atr_pct", "rsi_14", "ret_8", "trend_20_50", "breakout_20", "quote_volume_24h")
             if k in row and np.isfinite(row[k])
         },
     )
