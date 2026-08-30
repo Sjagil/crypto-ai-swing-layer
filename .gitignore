@@ -27,3 +27,17 @@ references/*
 .env
 .env.*
 !.env.example
+
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+*.log
+credentials.json
+secrets.json
+*.pem
+*.key
