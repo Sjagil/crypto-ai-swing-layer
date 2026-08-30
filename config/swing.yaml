@@ -1,0 +1,35 @@
+schema: crypto_ai_swing_v1
+
+runtime:
+  mode: shadow
+  base_currency: EUR
+  closed_bars_only: true
+  fail_closed: true
+
+timeframes:
+  execution: 15m
+  trigger: 1h
+  setup: [2h, 4h]
+  regime: [1d, 1w]
+  higher_timeframe_one_bar_lag: true
+  allow_partial_higher_bar: false
+
+signals:
+  minimum_entry_score: 0.62
+  minimum_exit_score: 0.55
+  minimum_model_probability: 0.55
+  ensemble:
+    deterministic: 0.45
+    supervised_ml: 0.30
+    forecast: 0.15
+    rl_challenger: 0.10
+
+holding:
+  minimum_bars: 3
+  maximum_bars: 160
+  cooldown_bars: 4
+
+paths:
+  output_root: output/crypto_ai_swing
+  artifact_root: artifacts/crypto_ai_swing
+  shadow_ledger: output/crypto_ai_swing/shadow/shadow.sqlite

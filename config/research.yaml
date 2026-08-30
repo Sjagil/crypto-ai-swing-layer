@@ -1,0 +1,44 @@
+schema: crypto_ai_swing_research_v1
+
+stages:
+  - FAST_DISCOVERY
+  - PARAMETER_SEARCH
+  - PURGED_WALK_FORWARD
+  - COST_STRESS
+  - STATISTICAL_VALIDATION
+  - CROSS_ENGINE_VALIDATION
+  - FORWARD_SHADOW
+
+walkforward:
+  minimum_train_size: 1000
+  validation_size: 250
+  test_size: 250
+  purge_bars: 64
+  embargo_bars: 16
+  random_shuffle: false
+
+cost_stress:
+  multiples: [1.0, 1.5, 2.0, 3.0]
+  required_multiple: 2.0
+
+promotion:
+  minimum_trades: 30
+  minimum_profit_factor: 1.05
+  minimum_expectancy_bps: 0.0
+  minimum_psr: 0.90
+  maximum_pbo: 0.50
+  minimum_walkforward_efficiency: 0.50
+  minimum_parameter_robustness: 0.55
+  maximum_drawdown: 0.30
+  require_positive_stressed_oos: true
+  require_cross_engine_validation: true
+  require_forward_shadow: true
+
+anti_overfit:
+  cscv_slices: 8
+  block_bootstrap: true
+  multiple_testing:
+    - BONFERRONI
+    - HOLM
+    - BENJAMINI_HOCHBERG
+    - DEFLATED_SHARPE

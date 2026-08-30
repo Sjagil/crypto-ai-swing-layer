@@ -1,0 +1,34 @@
+schema: crypto_ai_swing_universe_v1
+
+exchange:
+  primary: bitvavo
+  quote: EUR
+  require_native_market: true
+  require_trading_status: true
+
+discovery:
+  cmc_point_in_time: true
+  top_n: 75
+  use_stable_cmc_id: true
+  exclude_stablecoins: true
+  exclude_wrapped_assets: false
+
+hard_filters:
+  minimum_24h_quote_volume_eur: 250000
+  minimum_market_cap_usd: 50000000
+  maximum_spread_bps: 80
+  minimum_data_quality: 0.70
+  minimum_history_days: 180
+
+anti_hype:
+  maximum_24h_return: 0.35
+  maximum_volume_ratio: 5.0
+  penalize_new_listing_days: 30
+
+ranking_weights:
+  liquidity: 0.30
+  relative_strength: 0.25
+  trend_quality: 0.20
+  volatility_quality: 0.10
+  market_cap_quality: 0.10
+  context_quality: 0.05

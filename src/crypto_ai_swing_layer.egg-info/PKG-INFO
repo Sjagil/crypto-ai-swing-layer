@@ -1,0 +1,35 @@
+Metadata-Version: 2.4
+Name: crypto-ai-swing-layer
+Version: 0.1.0
+Summary: Crypto-only AI swing research, portfolio, shadow and execution-intent layer
+Requires-Python: >=3.11
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: pandas<3,>=2.2
+Requires-Dist: scipy<2,>=1.12
+Requires-Dist: scikit-learn<2,>=1.5
+Requires-Dist: PyYAML<7,>=6
+Requires-Dist: pydantic<3,>=2.7
+Requires-Dist: python-dotenv<2,>=1
+Requires-Dist: pyarrow>=15
+Requires-Dist: duckdb<2,>=1.0
+Requires-Dist: joblib<2,>=1.4
+Requires-Dist: typer<1,>=0.12
+Requires-Dist: rich<15,>=13
+Provides-Extra: ai
+Requires-Dist: torch>=2.2; extra == "ai"
+Requires-Dist: gymnasium<2,>=0.29; extra == "ai"
+Requires-Dist: stable-baselines3<3,>=2.3; extra == "ai"
+Requires-Dist: sb3-contrib<3,>=2.3; extra == "ai"
+Requires-Dist: transformers<6,>=4.40; extra == "ai"
+Requires-Dist: accelerate<2,>=1; extra == "ai"
+Requires-Dist: safetensors<1,>=0.4; extra == "ai"
+Provides-Extra: research
+Requires-Dist: optuna<5,>=4; extra == "research"
+Requires-Dist: skfolio<1,>=0.12; extra == "research"
+Requires-Dist: vectorbt<1,>=0.28; extra == "research"
+Requires-Dist: cvxpy<2,>=1.5; extra == "research"
+Requires-Dist: arch<9,>=7; extra == "research"
+Provides-Extra: dev
+Requires-Dist: pytest<10,>=8; extra == "dev"
+Requires-Dist: pytest-cov<8,>=5; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"

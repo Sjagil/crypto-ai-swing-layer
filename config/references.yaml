@@ -1,0 +1,89 @@
+schema: crypto_ai_swing_references_v1
+
+references:
+  nautilus_trader:
+    enabled: true
+    role: cross_engine_replay
+    repository: https://github.com/nautechsystems/nautilus_trader.git
+    directory: references/nautilus_trader
+    isolated_env: .venvs/nautilus
+
+  vectorbt:
+    enabled: true
+    role: vectorized_research_crosscheck
+    repository: https://github.com/polakowo/vectorbt.git
+    directory: references/vectorbt
+    isolated_env: .venvs/vectorbt
+
+  optuna:
+    enabled: true
+    role: hyperparameter_search
+    repository: https://github.com/optuna/optuna.git
+    directory: references/optuna
+    isolated_env: .venvs/optuna
+
+  skfolio:
+    enabled: true
+    role: portfolio_challenger
+    repository: https://github.com/skfolio/skfolio.git
+    directory: references/skfolio
+    isolated_env: .venvs/skfolio
+
+  stable_baselines3_contrib:
+    enabled: true
+    role: rl_challenger
+    repository: https://github.com/Stable-Baselines-Team/stable-baselines3-contrib.git
+    directory: references/stable-baselines3-contrib
+    isolated_env: .venvs/sb3-contrib
+
+  kronos:
+    enabled: true
+    role: forecast_challenger
+    repository: https://github.com/shiyu-coder/Kronos.git
+    directory: references/Kronos
+    isolated_env: .venvs/kronos
+
+  finrl_trading:
+    enabled: true
+    role: rl_benchmark
+    repository: https://github.com/AI4Finance-Foundation/FinRL-Trading.git
+    directory: references/FinRL-Trading
+    isolated_env: .venvs/finrl
+
+  lean:
+    enabled: false
+    role: optional_cross_engine_validation
+    repository: https://github.com/QuantConnect/Lean.git
+    directory: references/Lean
+    isolated_env: .venvs/lean
+
+  moondev:
+    enabled: false
+    role: optional_research_agent_patterns
+    repository: https://github.com/CurvedLightGroup/MoonDev-Trading-Ai-Agents.git
+    directory: references/MoonDev-Trading-Ai-Agents
+    isolated_env: .venvs/moondev
+
+  qlib:
+    enabled: false
+    role: excluded_equity_first_panel_stack
+    repository: https://github.com/microsoft/qlib.git
+    directory: references/qlib
+
+  pybroker:
+    enabled: false
+    role: excluded_equity_oriented_backtester
+    repository: https://github.com/edtechre/pybroker.git
+    directory: references/pybroker
+
+  vnpy:
+    enabled: false
+    role: excluded_not_required_for_bitvavo_layer
+    repository: https://github.com/vnpy/vnpy.git
+    directory: references/vnpy
+
+  vnpy_ib:
+    enabled: false
+    role: excluded_ib_specific
+    repository: https://github.com/vnpy/vnpy_ib.git
+    directory: references/vnpy_ib

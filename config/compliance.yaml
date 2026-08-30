@@ -1,0 +1,18 @@
+schema: crypto_ai_swing_compliance_v1
+
+spot_policy:
+  spot_only: true
+  leverage_allowed: false
+  derivatives_allowed: false
+  shorting_allowed: false
+
+asset_filter:
+  enabled: true
+  mode: hook
+  fail_closed_when_configured: true
+  allowed_assets_file: ""
+  denied_assets_file: ""
+
+notes:
+  - The compliance hook is intentionally separate from model scoring.
+  - A model may not override a denied asset.

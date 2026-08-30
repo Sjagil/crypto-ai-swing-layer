@@ -1,0 +1,44 @@
+schema: crypto_ai_swing_models_v1
+
+supervised:
+  enabled: true
+  family: hist_gradient_boosting
+  horizon_bars: 8
+  probability_threshold: 0.55
+  train_minimum_rows: 1000
+  retrain_every_bars: 168
+  random_shuffle: false
+
+forecast:
+  enabled: true
+  horizons_bars: [4, 8, 16, 24, 40]
+  quantiles: [0.10, 0.50, 0.90]
+  require_oos_forecast: true
+  require_uncertainty: true
+  require_cost_adjustment: true
+
+kronos:
+  enabled: true
+  role: challenger
+  reference: Kronos
+  model: NeoQuasar/Kronos-mini
+  tokenizer: NeoQuasar/Kronos-Tokenizer-2k
+  lookback: 256
+  prediction_length: 8
+  worker_timeout_seconds: 3600
+
+rl:
+  enabled: true
+  authority: challenger_only
+  algorithms: [MaskablePPO, RecurrentPPO]
+  live_decision_influence: false
+
+finrl:
+  enabled: true
+  role: benchmark_only
+  live_decision_influence: false
+
+llm:
+  enabled: false
+  authority: commentary_only
+  may_create_trade_intent: false

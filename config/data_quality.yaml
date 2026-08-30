@@ -1,0 +1,17 @@
+schema: crypto_ai_swing_data_quality_v1
+
+market_data:
+  minimum_coverage: 0.95
+  maximum_duplicate_ratio: 0.0
+  maximum_ohlc_violation_ratio: 0.0
+  maximum_negative_volume_ratio: 0.0
+  maximum_gap_ratio: 0.02
+  maximum_outlier_ratio: 0.02
+
+principles:
+  forward_fill_missing_market_bars: false
+  average_conflicting_ohlc: false
+  preserve_provenance: true
+  retain_disagreements: true
+  future_fact_join_allowed: false
+  point_in_time_universe_required: true

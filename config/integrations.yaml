@@ -1,0 +1,52 @@
+schema_version: 1
+
+crypto_repo:
+  env: CRYPTO_REPO_PATH
+  default: ../crypto
+  dynamic_imports_enabled: false
+
+candidate_paths:
+  bitvavo_ws:
+    - src/data_sources/bitvavo_ws_v7.py
+  bitvavo_market_data_pro_ws:
+    - src/data_sources/bitvavo_market_data_pro_ws_v7.py
+  coinmarketcap_client:
+    - src/data/providers/coinmarketcap_client.py
+  provider_capabilities:
+    - src/data/providers/historical_provider_capability_matrix.py
+  market_data_ingestion:
+    - scripts/data/run_market_data_ingestion_v7.py
+  realtime_market_state:
+    - src/runtime/realtime_market_state_v1.py
+  realtime_market_state_builder:
+    - scripts/runtime/build_realtime_market_state_v1.py
+  historical_data_lake:
+    - scripts/data_build/build_historical_data_lake_v7.py
+  historical_data_validator:
+    - scripts/data_quality/validate_historical_data_lake_v7.py
+  training_dataset_builder:
+    - scripts/data_build/build_training_ready_dataset_v7.py
+  rss:
+    - scrapers/rss.py
+  intelligence:
+    - scrapers/intelligence.py
+  launcher:
+    - worldmonitor_data_plane_launcher.py
+
+artifact_candidates:
+  realtime_market_state:
+    - output/trading_runtime_v1/realtime_market_state/latest.json
+  websocket_health:
+    - output/trading_runtime_v1/websocket_supervisor/status.json
+  cmc_provider_status:
+    - output/historical_data_v7/provider_status.json
+  historical_data:
+    - data/processed
+    - data/normalized
+    - data/derived
+
+execution_adapter:
+  mode: file_contract
+  intent_directory: output/crypto_ai_swing/trade_intents
+  command: []
+  live_command: []

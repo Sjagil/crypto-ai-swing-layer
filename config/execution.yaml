@@ -1,0 +1,33 @@
+schema: crypto_ai_swing_execution_v1
+
+authority:
+  default_mode: shadow
+  strategy_direct_exchange_calls: false
+  broker_submission_enabled: false
+  automatic_live_promotion: false
+  withdrawals_enabled: false
+
+costs:
+  fee_bps_per_side: 25.0
+  base_slippage_bps: 2.0
+  volatility_slippage_coefficient: 0.08
+  participation_coefficient: 12.0
+  maximum_slippage_bps: 150.0
+
+edge_gate:
+  minimum_net_edge_bps: 8.0
+  minimum_edge_to_cost_ratio: 1.50
+  round_trip: true
+
+liquidity:
+  maximum_participation_rate: 0.05
+  minimum_24h_quote_volume_eur: 250000
+  maximum_spread_bps: 80
+  reject_stale_orderbook: true
+  maximum_market_state_age_seconds: 20
+
+execution:
+  paper_enabled: true
+  live_enabled: false
+  intent_ttl_seconds: 120
+  external_adapter_command: []

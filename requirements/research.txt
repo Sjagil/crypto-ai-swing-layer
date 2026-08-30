@@ -1,0 +1,6 @@
+optuna>=4,<5
+skfolio>=0.12,<1
+vectorbt>=0.28,<1
+cvxpy>=1.5,<2
+arch>=7,<9
+quantstats>=0.0.62

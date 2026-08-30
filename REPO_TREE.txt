@@ -1,0 +1,43 @@
+crypto-ai-swing-layer/
+├── config/
+│   ├── compliance.yaml
+│   ├── data_quality.yaml
+│   ├── execution.yaml
+│   ├── integrations.yaml
+│   ├── models.yaml
+│   ├── references.yaml
+│   ├── research.yaml
+│   ├── risk.yaml
+│   ├── swing.yaml
+│   └── universe.yaml
+├── src/crypto_ai_swing/
+│   ├── bridge/
+│   ├── data/
+│   ├── execution/
+│   ├── integrations/
+│   ├── llm/
+│   ├── models/
+│   ├── orchestration/
+│   ├── portfolio/
+│   ├── research/
+│   ├── strategies/
+│   └── universe/
+├── scripts/
+│   ├── workers/
+│   ├── clone_references.py
+│   ├── doctor.py
+│   ├── install_into_crypto.py
+│   ├── print_tree.py
+│   └── smoke.py
+├── tests/
+├── docs/
+├── references/
+├── artifacts/
+├── data/
+├── output/
+├── .env.example
+├── .gitignore
+├── Makefile
+├── pyproject.toml
+├── requirements.txt
+└── README.md

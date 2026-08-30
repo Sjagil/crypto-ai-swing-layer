@@ -1,0 +1,32 @@
+schema: crypto_ai_swing_risk_v1
+
+market_policy:
+  spot_only: true
+  long_only: true
+  shorting_allowed: false
+  leverage_allowed: false
+  derivatives_allowed: false
+  quote_currency: EUR
+
+portfolio:
+  max_positions: 5
+  minimum_cash_fraction: 0.10
+  max_total_exposure_fraction: 0.85
+  max_single_position_fraction: 0.25
+  normal_max_heat_fraction: 0.04
+  hard_max_heat_fraction: 0.06
+  max_daily_realized_loss_fraction: 0.02
+
+trade:
+  risk_per_trade_fraction: 0.0065
+  strong_risk_fraction: 0.0090
+  exceptional_risk_fraction: 0.0110
+  default_stop_loss_pct: 0.03
+  default_take_profit_pct: 0.08
+  default_trailing_stop_pct: 0.04
+  minimum_stop_pct: 0.008
+  maximum_stop_pct: 0.08
+
+correlation:
+  maximum_pairwise_correlation: 0.85
+  maximum_cluster_weight: 0.35
