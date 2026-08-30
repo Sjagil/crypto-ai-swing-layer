@@ -41,3 +41,7 @@ credentials.json
 secrets.json
 *.pem
 *.key
+
+# Build/package artifacts
+*.egg-info/
+*.bak

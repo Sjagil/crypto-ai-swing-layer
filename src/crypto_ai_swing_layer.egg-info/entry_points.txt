@@ -1,2 +1,0 @@
-[console_scripts]
-crypto-swing = crypto_ai_swing.cli:app
