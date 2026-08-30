@@ -250,3 +250,41 @@ python scripts/print_tree.py
 ```
 
 for the generated structure.
+
+
+## Proactive runtime, native research and forward evidence
+
+The active runtime consumes Sjagil/crypto as the authoritative provider, market-data,
+news, research and execution-governance library. The swing layer does not submit
+direct Bitvavo orders. Live submission remains fail-closed behind the crypto
+execution authority mapping.
+
+Core checks:
+
+```bash
+python -m crypto_ai_swing.cli crypto-library-doctor
+python -m crypto_ai_swing.cli news-scan
+python -m crypto_ai_swing.cli market-data-audit BTC-EUR
+python -m crypto_ai_swing.cli research-doctor
+python -m crypto_ai_swing.cli strategy-factory-plan --trials 2000
+```
+
+One causal shadow cycle:
+
+```bash
+python -m crypto_ai_swing.cli proactive --mode shadow --once
+```
+
+Round 4 adds market-scoped FinBERT attribution, quantity-aware CVD, causal
+forward-outcome maturation, and an adapter to the native bounded research factory.
+
+```bash
+python -m crypto_ai_swing.cli research-run --stage0-only --maximum-rows 20000
+python -m crypto_ai_swing.cli forward-mature --horizons 1,4,24
+python -m crypto_ai_swing.cli forward-report
+```
+
+`strategy-factory-plan` preregisters strategy DNA only. It does not imply that all
+2,000 candidates have passed exact backtests. `research-run` invokes the canonical
+Sjagil/crypto research factory. Exact validation is explicit with `--exact`. Neither
+path grants paper or live authority automatically.

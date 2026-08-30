@@ -22,6 +22,7 @@ def estimate_cost(
     volatility_pct: float,
     participation_rate: float,
     config: dict,
+    quote_volume_eur: float | None = None,
 ) -> CostEstimate:
     costs = config.get("costs", {})
     gate = config.get("edge_gate", {})
@@ -47,6 +48,11 @@ def estimate_cost(
         blockers.append("SPREAD")
     if participation_rate > float(liquidity.get("maximum_participation_rate", 0.05)):
         blockers.append("PARTICIPATION")
+    if (
+        quote_volume_eur is not None
+        and quote_volume_eur < float(liquidity.get("minimum_24h_quote_volume_eur", 0.0))
+    ):
+        blockers.append("MIN_24H_QUOTE_VOLUME")
     if net < float(gate.get("minimum_net_edge_bps", 8.0)):
         blockers.append("NET_EDGE")
     if ratio < float(gate.get("minimum_edge_to_cost_ratio", 1.5)):

@@ -27,6 +27,8 @@ from crypto_ai_swing.nlp.sources import (
     discover_crypto_repo_documents,
     fetch_rss_documents,
 )
+from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
+from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
 
 
@@ -187,10 +189,31 @@ class ProactiveTrader:
         # Sjagil/crypto. Live order submission is intentionally disabled
         # until core.execution_authority is mapped exactly.
         self.client = BitvavoREST()
+        news_cfg = settings.autonomy.get("news", {}) if hasattr(settings, "autonomy") else {}
+        self.news_collector = CryptoNewsCollector(
+            self.crypto,
+            output_path=(
+                settings.project_root
+                / "output/crypto_ai_swing/intelligence/news.jsonl"
+            ),
+            cache_seconds=float(news_cfg.get("cache_seconds", 300)),
+            maximum_documents=int(news_cfg.get("maximum_documents", 500)),
+        )
+        forward_cfg = settings.autonomy.get("forward_evidence", {}) if hasattr(settings, "autonomy") else {}
+        forward_rel = forward_cfg.get(
+            "path", "output/crypto_ai_swing/forward/forward.sqlite"
+        )
+        self.forward = ForwardEvidenceLedger(settings.project_root / forward_rel)
         self._news_cache: tuple[float, list] | None = None
+        self._last_news_status: dict[str, Any] = {
+            "status": "NOT_RUN",
+            "source": "Sjagil/crypto:scrapers.rss",
+            "source_statuses": [],
+        }
 
     def close(self):
         self.state.close()
+        self.forward.close()
         self.client.close()
 
     def _markets(self) -> list[str]:
@@ -292,14 +315,42 @@ class ProactiveTrader:
         )
         if self._news_cache and now - self._news_cache[0] <= ttl:
             return list(self._news_cache[1])
-        docs = discover_crypto_repo_documents(
-            self.settings.crypto_repo_root
-        )
+        docs = []
+        news_cfg = self.settings.autonomy.get("news", {}) if hasattr(self.settings, "autonomy") else {}
+        if bool(news_cfg.get("enabled", True)):
+            try:
+                snapshot = self.news_collector.collect(
+                    persist=bool(news_cfg.get("persist", True))
+                )
+                docs.extend(snapshot.documents)
+                self._last_news_status = {
+                    "status": snapshot.status,
+                    "source": snapshot.source,
+                    "observed_at": snapshot.observed_at,
+                    "source_statuses": list(snapshot.source_statuses),
+                    "live_documents": len(snapshot.documents),
+                }
+            except Exception as exc:
+                self._last_news_status = {
+                    "status": "ERROR",
+                    "source": "Sjagil/crypto:scrapers.rss",
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "source_statuses": [],
+                    "live_documents": 0,
+                }
+        docs.extend(discover_crypto_repo_documents(self.settings.crypto_repo_root))
         rss_urls = list(self.settings.nlp.get("rss_urls", []) or [])
         if rss_urls:
             docs.extend(fetch_rss_documents(rss_urls))
-        self._news_cache = (now, list(docs))
-        return docs
+        unique = {}
+        for doc in docs:
+            key = (doc.source, doc.url or "", doc.title or doc.text[:200], doc.usable_at.isoformat())
+            unique[key] = doc
+        selected = sorted(unique.values(), key=lambda x: x.usable_at, reverse=True)
+        maximum = int(news_cfg.get("maximum_documents", 500))
+        selected = selected[:maximum]
+        self._news_cache = (now, list(selected))
+        return selected
 
     @staticmethod
     def _avg_fill_price(order: dict[str, Any]) -> Decimal:
@@ -559,20 +610,27 @@ class ProactiveTrader:
                     persist=persist,
                 )
                 mtf_frames[primary] = bundle.frame
-                mtf = self._mtf_score(mtf_frames)
+                primary_seconds = self.crypto.timeframe_seconds(primary)
+                decision_at = bundle.frame.index[-1] + pd.to_timedelta(primary_seconds, unit="s")
+                causal_frames = {
+                    tf: self.crypto.causal_frame(frame, tf, decision_at)
+                    for tf, frame in mtf_frames.items()
+                }
+                if causal_frames.get(primary) is None or causal_frames[primary].empty:
+                    skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_CANDLE"})
+                    continue
+                mtf = self._mtf_score(causal_frames)
                 orderflow = self._orderflow_score(bundle.microstructure)
-                quote_volume = float(
-                    bundle.ticker.get("volumeQuote")
-                    or bundle.ticker.get("quote_volume")
-                    or bundle.ticker.get("volume_quote")
-                    or 0.0
+                quote_volume = self.crypto.quote_volume_24h(
+                    bundle.ticker, bundle.microstructure
                 )
-                frame = bundle.frame.copy()
+                frame = causal_frames[primary].copy()
                 frame["quote_volume_24h"] = quote_volume
                 spreads[market] = float(
                     bundle.microstructure.get("spread_bps", 999.0)
                 )
-                assessment = self.nlp.aggregate(docs, market)
+                nlp_aggregation = self.nlp.aggregate_with_diagnostics(docs, market)
+                assessment = nlp_aggregation.assessment
                 entry_blocked = bool(
                     prospective_block
                     and self.settings.proactive.get(
@@ -585,6 +643,7 @@ class ProactiveTrader:
                     "nlp_severe_negative": assessment.severe_negative,
                     "event_tags": list(assessment.event_tags),
                     "nlp_model": assessment.model,
+                    "nlp_diagnostics": nlp_aggregation.diagnostics,
                     "mtf_score": mtf,
                     "orderflow_score": orderflow,
                     "book_imbalance": bundle.microstructure.get(
@@ -593,6 +652,32 @@ class ProactiveTrader:
                     "cvd_ratio": bundle.microstructure.get(
                         "cvd_ratio", 0.0
                     ),
+                    "cvd_notional_ratio": bundle.microstructure.get(
+                        "cvd_notional_ratio", 0.0
+                    ),
+                    "buy_volume": bundle.microstructure.get(
+                        "buy_volume", 0.0
+                    ),
+                    "sell_volume": bundle.microstructure.get(
+                        "sell_volume", 0.0
+                    ),
+                    "buy_notional": bundle.microstructure.get(
+                        "buy_notional", 0.0
+                    ),
+                    "sell_notional": bundle.microstructure.get(
+                        "sell_notional", 0.0
+                    ),
+                    "trade_count": bundle.microstructure.get(
+                        "trade_count", 0.0
+                    ),
+                    "classified_trade_count": bundle.microstructure.get(
+                        "classified_trade_count", 0.0
+                    ),
+                    "unclassified_trade_count": bundle.microstructure.get(
+                        "unclassified_trade_count", 0.0
+                    ),
+                    "quote_volume_24h": quote_volume,
+                    "decision_at": decision_at.isoformat(),
                     "microprice_edge_bps": bundle.microstructure.get(
                         "microprice_edge_bps", 0.0
                     ),
@@ -604,7 +689,7 @@ class ProactiveTrader:
                     "data_source": "Sjagil/crypto",
                 }
                 mtf_summary[market] = {
-                    tf: len(mtf_frames.get(tf, pd.DataFrame()))
+                    tf: len(causal_frames.get(tf, pd.DataFrame()))
                     for tf in timeframes
                 }
                 frames[market] = frame
@@ -672,6 +757,7 @@ class ProactiveTrader:
             "cash_eur": str(cash),
             "exposure_eur": str(exposure),
             "nlp_documents": len(docs),
+            "news": self._last_news_status,
             "crypto_library_ready": library_status.get("ready", False),
             "crypto_library_imported_modules": library_status.get(
                 "imported_modules", 0
@@ -708,6 +794,36 @@ class ProactiveTrader:
                 for k, v in self.state.positions().items()
             },
         }
+        candle_times = {
+            market: frame.index[-1].isoformat()
+            for market, frame in frames.items()
+            if frame is not None and not frame.empty
+        }
+        forward_cfg = self.settings.autonomy.get("forward_evidence", {}) if hasattr(self.settings, "autonomy") else {}
+        should_record = bool(forward_cfg.get("enabled", True)) and bool(
+            forward_cfg.get(f"record_{self.mode}", True)
+        )
+        if should_record:
+            payload["forward_evidence"] = self.forward.append_cycle(payload, candle_times)
+            if bool(forward_cfg.get("mature_on_cycle", True)):
+                horizons = tuple(
+                    int(value)
+                    for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or [])
+                    if int(value) > 0
+                )
+                payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(
+                    frames,
+                    horizons_hours=horizons or (1, 4, 24),
+                )
+            payload["forward_evidence"]["ledger"] = self.forward.status()
+            payload["forward_evidence"]["outcomes"] = self.forward.outcome_status()
+        else:
+            payload["forward_evidence"] = {
+                "recorded": False,
+                "ledger": self.forward.status(),
+                "outcomes": self.forward.outcome_status(),
+            }
+
         out = (
             self.settings.project_root
             / "output/crypto_ai_swing/proactive/latest.json"

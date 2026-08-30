@@ -27,6 +27,12 @@ class NLPAssessment:
     model: str
 
 
+@dataclass(frozen=True)
+class NLPAggregation:
+    assessment: NLPAssessment
+    diagnostics: dict[str, Any]
+
+
 POSITIVE = {
     "approval": 1.4,
     "approved": 1.5,
@@ -85,12 +91,33 @@ DEFAULT_ALIASES = {
     "DOGE": ("dogecoin", "doge"),
 }
 
+MACRO_CATEGORIES = {
+    "macro",
+    "macro_calendar",
+    "macro_liquidity",
+    "interest_rates",
+    "inflation",
+}
+GENERIC_CRYPTO_CATEGORIES = {
+    "crypto_market",
+    "crypto_news",
+    "crypto_market_structure",
+    "exchange",
+    "regulation",
+    "hack_exploit",
+    "stablecoin_risk",
+    "exchange_risk",
+    "token_unlock",
+}
+
 
 class NLPMarketEngine:
-    """Finance NLP with a FinBERT path and deterministic offline fallback.
+    """Finance NLP with market-scoped authority and deterministic fallback.
 
-    NLP is deliberately bounded. It can add context or veto severe negative events,
-    but it cannot manufacture a live entry without a price/market signal.
+    NLP can add context or veto a severe direct-asset event. BTC news can inform
+    alt markets at a bounded cross-asset weight, but cannot automatically carry a
+    severe veto into another asset. Generic security/regulatory headlines are
+    context unless an explicit market attribution exists.
     """
 
     def __init__(self, config: dict | None = None):
@@ -110,6 +137,7 @@ class NLPMarketEngine:
             return None
         try:
             from transformers import pipeline
+
             self._pipe = pipeline(
                 "text-classification",
                 model=self.model_name,
@@ -173,7 +201,10 @@ class NLPMarketEngine:
             try:
                 result = pipe(cleaned[:4000])
                 rows = result[0] if result and isinstance(result[0], list) else result
-                probs = {str(x.get("label", "")).lower(): float(x.get("score", 0.0)) for x in rows}
+                probs = {
+                    str(x.get("label", "")).lower(): float(x.get("score", 0.0))
+                    for x in rows
+                }
                 pos = probs.get("positive", 0.0)
                 neg = probs.get("negative", 0.0)
                 neutral = probs.get("neutral", 0.0)
@@ -185,8 +216,18 @@ class NLPMarketEngine:
             except Exception:
                 pass
 
-        severe_terms = ("hack", "exploit", "breach", "bankruptcy", "insolvency", "delist", "fraud")
-        severe_negative = score <= -0.45 and any(x in cleaned.lower() for x in severe_terms)
+        severe_terms = (
+            "hack",
+            "exploit",
+            "breach",
+            "bankruptcy",
+            "insolvency",
+            "delist",
+            "fraud",
+        )
+        severe_negative = score <= -0.45 and any(
+            x in cleaned.lower() for x in severe_terms
+        )
         return NLPAssessment(
             score=float(max(-1.0, min(1.0, score))),
             confidence=float(max(0.0, min(1.0, confidence))),
@@ -196,48 +237,181 @@ class NLPMarketEngine:
             model=model_used,
         )
 
-    def aggregate(
+    @staticmethod
+    def _metadata_values(doc: NLPDocument, key: str) -> tuple[str, ...]:
+        raw = doc.metadata.get(key, ()) if isinstance(doc.metadata, dict) else ()
+        if raw is None:
+            return ()
+        if isinstance(raw, str):
+            return (raw,)
+        try:
+            return tuple(str(value) for value in raw)
+        except TypeError:
+            return ()
+
+    def aggregate_with_diagnostics(
         self,
         documents: Iterable[NLPDocument],
         market: str,
         now: datetime | None = None,
-    ) -> NLPAssessment:
+    ) -> NLPAggregation:
         now = now or datetime.now(timezone.utc)
         base = market.split("-", 1)[0].upper()
+        market = market.upper()
         half_life_hours = float(self.config.get("half_life_hours", 12.0))
         maximum_age_hours = float(self.config.get("maximum_age_hours", 72.0))
+        direct_weight = float(self.config.get("direct_asset_weight", 1.0))
+        btc_cross_weight = float(self.config.get("btc_cross_asset_weight", 0.20))
+        macro_weight = float(self.config.get("macro_weight", 0.25))
+        generic_weight = float(self.config.get("generic_weight", 0.10))
+        severe_direct_only = bool(
+            self.config.get("severe_veto_direct_asset_only", True)
+        )
+
         weighted_score = 0.0
         total_weight = 0.0
         tags: set[str] = set()
         models: set[str] = set()
         severe = False
+        considered = 0
         used = 0
+        scope_counts = {
+            "direct_asset": 0,
+            "btc_cross_asset": 0,
+            "macro": 0,
+            "generic_crypto": 0,
+            "rejected_other_asset": 0,
+            "expired": 0,
+            "invalid_timestamp": 0,
+        }
+        contributors: list[dict[str, Any]] = []
 
         for doc in documents:
             usable_at = doc.usable_at
             if usable_at.tzinfo is None:
+                scope_counts["invalid_timestamp"] += 1
                 continue
-            age_h = max(0.0, (now - usable_at.astimezone(timezone.utc)).total_seconds() / 3600.0)
+            age_h = max(
+                0.0,
+                (now - usable_at.astimezone(timezone.utc)).total_seconds() / 3600.0,
+            )
             if age_h > maximum_age_hours:
+                scope_counts["expired"] += 1
                 continue
+            considered += 1
             assessment = self.assess_text(f"{doc.title} {doc.text}")
-            if assessment.assets and base not in assessment.assets and "BTC" not in assessment.assets:
+            metadata_markets = {
+                value.upper() for value in self._metadata_values(doc, "markets")
+            }
+            categories = {
+                value.lower() for value in self._metadata_values(doc, "categories")
+            }
+            detected_assets = set(assessment.assets)
+
+            direct = market in metadata_markets or base in detected_assets
+            btc_cross = (
+                base != "BTC"
+                and not direct
+                and ("BTC-EUR" in metadata_markets or "BTC" in detected_assets)
+            )
+            macro = (
+                not direct
+                and not btc_cross
+                and not metadata_markets
+                and not detected_assets
+                and (bool(categories & MACRO_CATEGORIES) or "MACRO" in assessment.event_tags)
+            )
+            generic = (
+                not direct
+                and not btc_cross
+                and not macro
+                and not metadata_markets
+                and not detected_assets
+                and bool(categories & GENERIC_CRYPTO_CATEGORIES)
+            )
+
+            if direct:
+                scope = "direct_asset"
+                scope_weight = direct_weight
+            elif btc_cross:
+                scope = "btc_cross_asset"
+                scope_weight = btc_cross_weight
+            elif macro:
+                scope = "macro"
+                scope_weight = macro_weight
+            elif generic:
+                scope = "generic_crypto"
+                scope_weight = generic_weight
+            else:
+                scope_counts["rejected_other_asset"] += 1
                 continue
-            asset_weight = 1.0 if base in assessment.assets else 0.45
+
             recency = 0.5 ** (age_h / max(half_life_hours, 1e-6))
-            weight = asset_weight * recency * max(0.10, assessment.confidence)
+            relevance = float(doc.metadata.get("relevance_score", 1.0) or 0.0)
+            relevance_factor = max(0.20, min(1.0, relevance if relevance > 0 else 1.0))
+            impact = float(doc.metadata.get("impact_score", 0.0) or 0.0)
+            impact_factor = 1.0 + 0.25 * max(0.0, min(1.0, impact))
+            weight = (
+                scope_weight
+                * recency
+                * max(0.10, assessment.confidence)
+                * relevance_factor
+                * impact_factor
+            )
+            if weight <= 0:
+                continue
+
             weighted_score += assessment.score * weight
             total_weight += weight
             tags.update(assessment.event_tags)
             models.add(assessment.model)
-            severe = severe or (assessment.severe_negative and (base in assessment.assets or not assessment.assets))
+            scope_counts[scope] += 1
             used += 1
+            if assessment.severe_negative and (
+                direct or (not severe_direct_only and scope in {"macro", "generic_crypto"})
+            ):
+                severe = True
+            contributors.append(
+                {
+                    "source": doc.source,
+                    "title": doc.title[:180],
+                    "scope": scope,
+                    "weight": round(float(weight), 8),
+                    "score": round(float(assessment.score), 6),
+                    "severe_negative": bool(assessment.severe_negative and direct),
+                    "assets": list(assessment.assets),
+                    "markets": sorted(metadata_markets),
+                    "categories": sorted(categories),
+                    "age_hours": round(float(age_h), 3),
+                }
+            )
 
+        diagnostics = {
+            "market": market,
+            "documents_considered": considered,
+            "documents_used": used,
+            "scope_counts": scope_counts,
+            "total_weight": float(total_weight),
+            "severe_veto_policy": (
+                "DIRECT_ASSET_ONLY" if severe_direct_only else "CONFIGURED_BROAD"
+            ),
+            "top_contributors": sorted(
+                contributors,
+                key=lambda row: abs(float(row["weight"]) * float(row["score"])),
+                reverse=True,
+            )[:8],
+        }
         if total_weight <= 0 or used == 0:
-            return NLPAssessment(0.0, 0.0, False, (), (base,), "none")
+            return NLPAggregation(
+                NLPAssessment(0.0, 0.0, False, (), (base,), "none"),
+                diagnostics,
+            )
         score = weighted_score / total_weight
-        confidence = min(1.0, 0.35 + 0.12 * used + min(0.25, total_weight / 10.0))
-        return NLPAssessment(
+        confidence = min(
+            0.95,
+            0.20 + 0.07 * min(used, 8) + min(0.19, total_weight / 8.0),
+        )
+        assessment = NLPAssessment(
             float(max(-1.0, min(1.0, score))),
             float(confidence),
             severe,
@@ -245,3 +419,12 @@ class NLPMarketEngine:
             (base,),
             "+".join(sorted(models)),
         )
+        return NLPAggregation(assessment, diagnostics)
+
+    def aggregate(
+        self,
+        documents: Iterable[NLPDocument],
+        market: str,
+        now: datetime | None = None,
+    ) -> NLPAssessment:
+        return self.aggregate_with_diagnostics(documents, market, now).assessment

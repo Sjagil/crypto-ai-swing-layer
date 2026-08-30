@@ -7,8 +7,8 @@ import json
 import os
 import subprocess
 
-from crypto_ai_swing.contracts import Authority, Side, TradeIntent
-from crypto_ai_swing.execution.bitvavo import BitvavoREST, live_gate_status
+from crypto_ai_swing.contracts import Authority, TradeIntent
+from crypto_ai_swing.execution.bitvavo import live_gate_status
 
 
 @dataclass(frozen=True)
@@ -61,11 +61,19 @@ class ExecutionRouter:
             if not gate.ready:
                 return RouteResult(False, mode, path=path, blocker=";".join(gate.blockers))
             if str(adapter.get("mode", "file_contract")) == "direct_bitvavo":
-                if intent.side != Side.BUY:
-                    return RouteResult(False, mode, path=path, blocker="DIRECT_ROUTER_BUY_ONLY")
-                with BitvavoREST() as client:
-                    response = client.place_market_buy(intent.market, intent.notional_eur, intent.intent_id)
-                return RouteResult(True, mode, path=path, response=response)
+                return RouteResult(
+                    False,
+                    mode,
+                    path=path,
+                    blocker="DIRECT_BITVAVO_EXECUTION_DISABLED_USE_CRYPTO_AUTHORITY",
+                )
+            if str(adapter.get("mode", "file_contract")) == "crypto_execution_authority":
+                return RouteResult(
+                    False,
+                    mode,
+                    path=path,
+                    blocker="CRYPTO_EXECUTION_AUTHORITY_SUBMISSION_NOT_MAPPED",
+                )
             command = adapter.get("live_command", [])
         else:
             return RouteResult(False, mode, path=path, blocker="UNKNOWN_MODE")

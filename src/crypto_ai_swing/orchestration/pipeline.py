@@ -125,6 +125,7 @@ class SwingPipeline:
                 signal.features.get("atr_pct", 0.02),
                 participation,
                 exec_cfg,
+                quote_volume_eur=quote_volume,
             )
             if not cost.approved:
                 blocked.append(

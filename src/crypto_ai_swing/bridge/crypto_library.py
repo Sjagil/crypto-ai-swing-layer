@@ -302,6 +302,8 @@ class CryptoLibraryBridge:
 
         buy_volume = 0.0
         sell_volume = 0.0
+        buy_notional = 0.0
+        sell_notional = 0.0
         trade_count = 0
         for trade in trades:
             trade_count += 1
@@ -312,7 +314,8 @@ class CryptoLibraryBridge:
                 or ""
             ).lower()
             amount = (
-                trade.get("amount")
+                trade.get("quantity")
+                or trade.get("amount")
                 or trade.get("volume")
                 or trade.get("size")
                 or 0.0
@@ -321,14 +324,36 @@ class CryptoLibraryBridge:
                 qty = float(amount)
             except Exception:
                 qty = 0.0
+            try:
+                trade_price = float(trade.get("price") or 0.0)
+            except Exception:
+                trade_price = 0.0
             if side in {"buy", "bid", "buyer", "b"}:
                 buy_volume += qty
+                buy_notional += qty * trade_price
             elif side in {"sell", "ask", "seller", "s"}:
                 sell_volume += qty
+                sell_notional += qty * trade_price
         classified = buy_volume + sell_volume
+        classified_trade_count = 0
+        for trade in trades:
+            side = str(
+                trade.get("side")
+                or trade.get("aggressor_side")
+                or trade.get("taker_side")
+                or ""
+            ).lower()
+            if side in {"buy", "bid", "buyer", "b", "sell", "ask", "seller", "s"}:
+                classified_trade_count += 1
         cvd_ratio = (
             (buy_volume - sell_volume) / classified
             if classified > 0
+            else 0.0
+        )
+        classified_notional = buy_notional + sell_notional
+        cvd_notional_ratio = (
+            (buy_notional - sell_notional) / classified_notional
+            if classified_notional > 0
             else 0.0
         )
 
@@ -339,9 +364,125 @@ class CryptoLibraryBridge:
             "book_imbalance": book_imbalance,
             "microprice_edge_bps": microprice_edge_bps,
             "trade_count": float(trade_count),
+            "classified_trade_count": float(classified_trade_count),
+            "unclassified_trade_count": float(max(0, trade_count - classified_trade_count)),
             "buy_volume": buy_volume,
             "sell_volume": sell_volume,
+            "buy_notional": buy_notional,
+            "sell_notional": sell_notional,
             "cvd_ratio": cvd_ratio,
+            "cvd_notional_ratio": cvd_notional_ratio,
+        }
+
+    @staticmethod
+    def timeframe_seconds(timeframe: str) -> int:
+        mapping = {
+            "5m": 300,
+            "15m": 900,
+            "1h": 3600,
+            "2h": 7200,
+            "4h": 14400,
+            "1d": 86400,
+            "1w": 604800,
+            "1W": 604800,
+        }
+        if timeframe not in mapping:
+            raise CryptoLibraryError(f"Unsupported timeframe: {timeframe}")
+        return mapping[timeframe]
+
+    @classmethod
+    def causal_frame(
+        cls,
+        frame: pd.DataFrame,
+        timeframe: str,
+        decision_at: pd.Timestamp | datetime,
+    ) -> pd.DataFrame:
+        """Keep only bars fully closed by decision_at. Index is candle-open time."""
+        if frame is None or frame.empty:
+            return frame.copy() if frame is not None else pd.DataFrame()
+        decision = pd.Timestamp(decision_at)
+        decision = decision.tz_convert("UTC") if decision.tzinfo else decision.tz_localize("UTC")
+        close_times = frame.index + pd.to_timedelta(cls.timeframe_seconds(timeframe), unit="s")
+        return frame.loc[close_times <= decision].copy()
+
+    @staticmethod
+    def quote_volume_24h(
+        ticker: Mapping[str, Any],
+        microstructure: Mapping[str, float] | None = None,
+    ) -> float:
+        for key in (
+            "volumeQuote",
+            "quoteVolume",
+            "quote_volume",
+            "volume_quote",
+            "quote_volume_24h",
+            "volumeQuote24h",
+        ):
+            value = ticker.get(key)
+            try:
+                selected = float(value)
+                if selected > 0:
+                    return selected
+            except Exception:
+                pass
+        base_volume = None
+        for key in ("volume", "baseVolume", "base_volume", "volume_24h"):
+            try:
+                selected = float(ticker.get(key) or 0.0)
+                if selected > 0:
+                    base_volume = selected
+                    break
+            except Exception:
+                pass
+        price = 0.0
+        for key in ("price", "last", "lastPrice", "close"):
+            try:
+                selected = float(ticker.get(key) or 0.0)
+                if selected > 0:
+                    price = selected
+                    break
+            except Exception:
+                pass
+        if price <= 0 and microstructure:
+            bid = float(microstructure.get("best_bid", 0.0) or 0.0)
+            ask = float(microstructure.get("best_ask", 0.0) or 0.0)
+            if bid > 0 and ask > 0:
+                price = (bid + ask) / 2.0
+        return float(base_volume * price) if base_volume and price > 0 else 0.0
+
+    @staticmethod
+    def market_bundle_audit(bundle: CryptoMarketBundle) -> dict[str, Any]:
+        side_counts: dict[str, int] = {}
+        trade_keys: set[str] = set()
+        for trade in bundle.trades:
+            trade_keys.update(str(k) for k in trade.keys())
+            side = str(
+                trade.get("side")
+                or trade.get("aggressor_side")
+                or trade.get("taker_side")
+                or "<missing>"
+            ).lower()
+            side_counts[side] = side_counts.get(side, 0) + 1
+        return {
+            "market": bundle.market,
+            "timeframe": bundle.timeframe,
+            "rows": len(bundle.frame),
+            "ticker_keys": sorted(str(k) for k in bundle.ticker.keys()),
+            "ticker_public": {
+                str(k): v
+                for k, v in bundle.ticker.items()
+                if str(k).lower() not in {"apikey", "api_key", "secret", "signature"}
+            },
+            "quote_volume_24h": CryptoLibraryBridge.quote_volume_24h(
+                bundle.ticker, bundle.microstructure
+            ),
+            "trade_count": len(bundle.trades),
+            "trade_keys": sorted(trade_keys),
+            "trade_side_counts": dict(sorted(side_counts.items())),
+            "orderbook_keys": sorted(str(k) for k in bundle.orderbook.keys()),
+            "bid_levels": len(CryptoLibraryBridge._book_levels(bundle.orderbook, "bids")),
+            "ask_levels": len(CryptoLibraryBridge._book_levels(bundle.orderbook, "asks")),
+            "microstructure": dict(bundle.microstructure),
         }
 
     @staticmethod
