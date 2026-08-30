@@ -37,7 +37,11 @@ class SwingPipeline:
     ) -> PipelineResult:
         spread_bps = spread_bps or {}
         market_context = market_context or {}
-        minimum = float(self.settings.swing.get("signals", {}).get("minimum_entry_score", 0.62))
+        minimum = float(
+            self.settings.swing.get("signals", {}).get(
+                "minimum_entry_score", 0.62
+            )
+        )
         signals = []
 
         for market, frame in frames.items():
@@ -47,7 +51,9 @@ class SwingPipeline:
             row = feat.iloc[-1].copy()
             if "quote_volume_24h" in frame.columns:
                 try:
-                    row["quote_volume_24h"] = float(frame["quote_volume_24h"].dropna().iloc[-1])
+                    row["quote_volume_24h"] = float(
+                        frame["quote_volume_24h"].dropna().iloc[-1]
+                    )
                 except Exception:
                     pass
             ts = feat.index[-1].to_pydatetime()
@@ -58,24 +64,61 @@ class SwingPipeline:
                 row,
                 nlp_score=context.get("nlp_score"),
                 nlp_confidence=context.get("nlp_confidence"),
-                nlp_severe_negative=bool(context.get("nlp_severe_negative", False)),
+                nlp_severe_negative=bool(
+                    context.get("nlp_severe_negative", False)
+                ),
+                mtf_score=context.get("mtf_score"),
+                orderflow_score=context.get("orderflow_score"),
+                context_entry_blocked=bool(
+                    context.get("entry_blocked", False)
+                ),
                 minimum_entry_score=minimum,
             )
             signals.append(signal)
 
-        allocations = allocate(signals, equity_eur, cash_eur, exposure_eur, open_risk_eur, self.settings.risk)
+        allocations = allocate(
+            signals,
+            equity_eur,
+            cash_eur,
+            exposure_eur,
+            open_risk_eur,
+            self.settings.risk,
+        )
         intents: list[TradeIntent] = []
         blocked: list[dict] = []
         exec_cfg = self.settings.execution
-        ttl = int(exec_cfg.get("execution", {}).get("intent_ttl_seconds", 120))
+        ttl = int(
+            exec_cfg.get("execution", {}).get("intent_ttl_seconds", 120)
+        )
 
         for allocation in allocations:
             signal, risk = allocation.signal, allocation.risk
-            if not risk.approved:
-                blocked.append({"market": signal.market, "blockers": list(risk.blockers)})
+            if signal.side.value != "BUY":
+                context = market_context.get(signal.market, {})
+                blockers = []
+                if context.get("entry_blocked"):
+                    blockers.append("CRYPTO_REPO_CONTEXT_GATE")
+                if context.get("nlp_severe_negative"):
+                    blockers.append("NLP_SEVERE_NEGATIVE")
+                if blockers:
+                    blocked.append(
+                        {"market": signal.market, "blockers": blockers}
+                    )
                 continue
-            quote_volume = float(signal.features.get("quote_volume_24h", 1_000_000.0))
-            participation = float(risk.order_notional_eur) / max(1.0, quote_volume)
+            if not risk.approved:
+                blocked.append(
+                    {
+                        "market": signal.market,
+                        "blockers": list(risk.blockers),
+                    }
+                )
+                continue
+            quote_volume = float(
+                signal.features.get("quote_volume_24h", 1_000_000.0)
+            )
+            participation = float(risk.order_notional_eur) / max(
+                1.0, quote_volume
+            )
             cost = estimate_cost(
                 signal.expected_edge_bps,
                 spread_bps.get(signal.market, 10.0),
@@ -84,7 +127,12 @@ class SwingPipeline:
                 exec_cfg,
             )
             if not cost.approved:
-                blocked.append({"market": signal.market, "blockers": list(cost.blockers)})
+                blocked.append(
+                    {
+                        "market": signal.market,
+                        "blockers": list(cost.blockers),
+                    }
+                )
                 continue
 
             created = datetime.now(timezone.utc)
@@ -107,16 +155,27 @@ class SwingPipeline:
                     "signal_score": signal.score,
                     "signal_confidence": signal.confidence,
                     "portfolio_heat_after": risk.portfolio_heat_after,
-                    "nlp": context,
+                    "crypto_repo_context": context,
                 },
             )
             intents.append(intent)
 
-        ledger_rel = self.settings.swing.get("paths", {}).get("shadow_ledger", "output/crypto_ai_swing/shadow/shadow.sqlite")
+        ledger_rel = self.settings.swing.get("paths", {}).get(
+            "shadow_ledger",
+            "output/crypto_ai_swing/shadow/shadow.sqlite",
+        )
         ledger = ShadowLedger(self.settings.project_root / ledger_rel)
         try:
             for intent in intents:
-                ledger.append(intent.intent_id, "TRADE_INTENT", intent.to_dict())
+                ledger.append(
+                    intent.intent_id,
+                    "TRADE_INTENT",
+                    intent.to_dict(),
+                )
         finally:
             ledger.close()
-        return PipelineResult(signals=signals, intents=intents, blocked=blocked)
+        return PipelineResult(
+            signals=signals,
+            intents=intents,
+            blocked=blocked,
+        )

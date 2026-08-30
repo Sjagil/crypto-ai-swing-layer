@@ -1,52 +1,66 @@
-schema_version: 1
+schema_version: 2
 
 crypto_repo:
   env: CRYPTO_REPO_PATH
   default: ../crypto
-  dynamic_imports_enabled: false
+  required: true
+  dynamic_imports_enabled: true
+  mode: python_library
+  source_of_truth: true
 
-candidate_paths:
-  bitvavo_ws:
-    - src/data_sources/bitvavo_ws_v7.py
-  bitvavo_market_data_pro_ws:
-    - src/data_sources/bitvavo_market_data_pro_ws_v7.py
-  coinmarketcap_client:
-    - src/data/providers/coinmarketcap_client.py
-  provider_capabilities:
-    - src/data/providers/historical_provider_capability_matrix.py
-  market_data_ingestion:
-    - scripts/data/run_market_data_ingestion_v7.py
-  realtime_market_state:
-    - src/runtime/realtime_market_state_v1.py
-  realtime_market_state_builder:
-    - scripts/runtime/build_realtime_market_state_v1.py
-  historical_data_lake:
-    - scripts/data_build/build_historical_data_lake_v7.py
-  historical_data_validator:
-    - scripts/data_quality/validate_historical_data_lake_v7.py
-  training_dataset_builder:
-    - scripts/data_build/build_training_ready_dataset_v7.py
-  rss:
-    - scrapers/rss.py
-  intelligence:
-    - scrapers/intelligence.py
-  launcher:
-    - worldmonitor_data_plane_launcher.py
+modules:
+  settings: config.settings
+  data_loader: data.data_loader
+  database: data.database
+  websocket: data.websocket_manager
+  orderflow: data.orderflow_recorder
+  orderbook: data.orderbook_l2
+  l2_reconstruction: data.bitvavo_l2_reconstruction_v2
+  realtime_candles: data.realtime_candle_builder
+  multi_source_runtime: data.multi_source_runtime
+  multi_source_platform: data.multi_source_platform
+  multi_source_maturation: data.multi_source_maturation
+  collector_health: data.collector_health
+  feature_store: data.feature_store
+  prospective_context: data.prospective_context
+  market_intelligence: core.market_intelligence
+  opportunity_intelligence: core.opportunity_intelligence
+  practical_governance: core.practical_governance
+  execution_authority: core.execution_authority
+  account_inventory: core.account_inventory
+  live_asset_preflight: core.live_asset_preflight
+  autonomous_live: core.autonomous_live
+  research_features: research.features
+  research_factory: research.research_factory
+  rss: scrapers.rss
+  intelligence: scrapers.intelligence
 
-artifact_candidates:
-  realtime_market_state:
-    - output/trading_runtime_v1/realtime_market_state/latest.json
-  websocket_health:
-    - output/trading_runtime_v1/websocket_supervisor/status.json
-  cmc_provider_status:
-    - output/historical_data_v7/provider_status.json
-  historical_data:
-    - data/processed
-    - data/normalized
-    - data/derived
+market_data:
+  provider: crypto_library
+  venue: bitvavo
+  primary_signal_timeframe: 1h
+  execution_timeframe: 15m
+  timeframes: [15m, 1h, 2h, 4h, 1d, 1w]
+  use_data_loader: true
+  use_ticker: true
+  use_trades: true
+  use_orderbook: true
+  use_microstructure: true
+  use_prospective_context: true
+  websocket_first: true
+  rest_backfill: true
+
+intelligence:
+  use_crypto_repo_artifacts: true
+  use_parquet: true
+  use_json: true
+  modules: [scrapers.rss, scrapers.intelligence]
 
 execution_adapter:
-  mode: file_contract
+  mode: crypto_execution_authority
+  direct_bitvavo_fallback: false
   intent_directory: output/crypto_ai_swing/trade_intents
-  command: []
-  live_command: []
+  live_submission_enabled: false
+  note: >-
+    Live submission stays fail-closed until crypto-library-doctor exposes the
+    exact public callable/contract in core.execution_authority on this checkout.

@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_proactive_v1
+schema: crypto_ai_swing_proactive_v2
 markets: [BTC-EUR, ETH-EUR, SOL-EUR]
 interval_seconds: 60
 candle_limit: 600
@@ -7,6 +7,22 @@ state_path: output/crypto_ai_swing/proactive/state.sqlite
 closed_candles_only: true
 manage_exits_every_cycle: true
 nlp_every_cycle: true
+
+data_source: crypto_library
+primary_signal_timeframe: 1h
+execution_timeframe: 15m
+timeframes: [15m, 1h, 2h, 4h, 1d, 1w]
+orderbook_depth: 100
+market_data_persist_shadow: false
+market_data_persist_paper: true
+market_data_persist_live: true
+nlp_cache_seconds: 300
+prospective_context_cache_seconds: 300
+
+context_gates:
+  block_on_prospective_context_block: true
+  require_microstructure_in_live: true
+  require_crypto_library_in_live: true
 
 account:
   use_private_balances_in_shadow: false

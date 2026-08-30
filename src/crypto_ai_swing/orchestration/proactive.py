@@ -9,10 +9,24 @@ import sqlite3
 import time
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
+from crypto_ai_swing.bridge.crypto_library import (
+    CryptoLibraryBridge,
+    CryptoLibraryError,
+)
 from crypto_ai_swing.contracts import Authority, TradeIntent
-from crypto_ai_swing.execution.bitvavo import BitvavoREST, BitvavoError, live_gate_status
+from crypto_ai_swing.execution.bitvavo import (
+    BitvavoREST,
+    BitvavoError,
+    live_gate_status,
+)
 from crypto_ai_swing.nlp.engine import NLPMarketEngine
-from crypto_ai_swing.nlp.sources import discover_crypto_repo_documents, fetch_rss_documents
+from crypto_ai_swing.nlp.sources import (
+    discover_crypto_repo_documents,
+    fetch_rss_documents,
+)
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
 
 
@@ -76,35 +90,83 @@ class ProactiveState:
         ).fetchone()
         return bool(row)
 
-    def mark(self, market: str, candle_ts: str, action: str, payload: dict):
+    def mark(
+        self,
+        market: str,
+        candle_ts: str,
+        action: str,
+        payload: dict,
+    ):
         self.conn.execute(
             "INSERT OR IGNORE INTO decisions VALUES (?,?,?,?,?)",
-            (market, candle_ts, action, datetime.now(timezone.utc).isoformat(), json.dumps(payload, sort_keys=True, default=str)),
+            (
+                market,
+                candle_ts,
+                action,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(payload, sort_keys=True, default=str),
+            ),
         )
         self.conn.commit()
 
     def positions(self) -> dict[str, Position]:
-        rows = self.conn.execute("SELECT market,amount,entry_price,highest_price,stop_pct,take_profit_pct,trailing_stop_pct,opened_at FROM positions").fetchall()
+        rows = self.conn.execute(
+            "SELECT market,amount,entry_price,highest_price,stop_pct,"
+            "take_profit_pct,trailing_stop_pct,opened_at FROM positions"
+        ).fetchall()
         return {
-            r[0]: Position(r[0], Decimal(r[1]), Decimal(r[2]), Decimal(r[3]), float(r[4]), float(r[5]), float(r[6]), r[7])
+            r[0]: Position(
+                r[0],
+                Decimal(r[1]),
+                Decimal(r[2]),
+                Decimal(r[3]),
+                float(r[4]),
+                float(r[5]),
+                float(r[6]),
+                r[7],
+            )
             for r in rows
         }
 
     def upsert_position(self, pos: Position):
         self.conn.execute(
             "INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?)",
-            (pos.market, str(pos.amount), str(pos.entry_price), str(pos.highest_price), pos.stop_pct, pos.take_profit_pct, pos.trailing_stop_pct, pos.opened_at),
+            (
+                pos.market,
+                str(pos.amount),
+                str(pos.entry_price),
+                str(pos.highest_price),
+                pos.stop_pct,
+                pos.take_profit_pct,
+                pos.trailing_stop_pct,
+                pos.opened_at,
+            ),
         )
         self.conn.commit()
 
     def delete_position(self, market: str):
-        self.conn.execute("DELETE FROM positions WHERE market=?", (market,))
+        self.conn.execute(
+            "DELETE FROM positions WHERE market=?", (market,)
+        )
         self.conn.commit()
 
-    def record_order(self, intent_id: str | None, market: str, side: str, payload: dict):
+    def record_order(
+        self,
+        intent_id: str | None,
+        market: str,
+        side: str,
+        payload: dict,
+    ):
         self.conn.execute(
-            "INSERT INTO orders(intent_id,market,side,created_at,payload) VALUES (?,?,?,?,?)",
-            (intent_id, market, side, datetime.now(timezone.utc).isoformat(), json.dumps(payload, sort_keys=True, default=str)),
+            "INSERT INTO orders(intent_id,market,side,created_at,payload) "
+            "VALUES (?,?,?,?,?)",
+            (
+                intent_id,
+                market,
+                side,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(payload, sort_keys=True, default=str),
+            ),
         )
         self.conn.commit()
 
@@ -113,10 +175,19 @@ class ProactiveTrader:
     def __init__(self, settings, mode: str = "shadow"):
         self.settings = settings
         self.mode = mode.lower()
-        state_rel = settings.proactive.get("state_path", "output/crypto_ai_swing/proactive/state.sqlite")
+        state_rel = settings.proactive.get(
+            "state_path",
+            "output/crypto_ai_swing/proactive/state.sqlite",
+        )
         self.state = ProactiveState(settings.project_root / state_rel)
         self.nlp = NLPMarketEngine(settings.nlp)
+        self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
+        # Direct REST is retained only for the already-existing private
+        # account preflight/bootstrap. Round 2 market data is sourced from
+        # Sjagil/crypto. Live order submission is intentionally disabled
+        # until core.execution_authority is mapped exactly.
         self.client = BitvavoREST()
+        self._news_cache: tuple[float, list] | None = None
 
     def close(self):
         self.state.close()
@@ -124,24 +195,33 @@ class ProactiveTrader:
 
     def _markets(self) -> list[str]:
         import os
+
         raw = os.getenv("CRYPTO_SWING_MARKETS")
         if raw:
-            return [x.strip().upper() for x in raw.split(",") if x.strip()]
-        values = self.settings.proactive.get("markets", ["BTC-EUR", "ETH-EUR", "SOL-EUR"])
+            return [
+                x.strip().upper()
+                for x in raw.split(",")
+                if x.strip()
+            ]
+        values = self.settings.proactive.get(
+            "markets", ["BTC-EUR", "ETH-EUR", "SOL-EUR"]
+        )
         return [str(x).upper() for x in values]
 
     def _fallback_account(self) -> tuple[Decimal, Decimal, Decimal]:
         fallback = Decimal(
-            str(self.settings.proactive.get("shadow_equity_eur", 10000))
+            str(
+                self.settings.proactive.get(
+                    "shadow_equity_eur", 10000
+                )
+            )
         )
         return fallback, fallback, Decimal("0")
 
     def _private_account_enabled(self) -> bool:
         account_cfg = self.settings.proactive.get("account", {}) or {}
-
         if self.mode == "live":
             return True
-
         return bool(
             account_cfg.get(
                 f"use_private_balances_in_{self.mode}",
@@ -149,26 +229,23 @@ class ProactiveTrader:
             )
         )
 
-    def _account(self, markets: list[str]) -> tuple[Decimal, Decimal, Decimal]:
-        # Shadow and paper must remain runnable without authenticated
-        # exchange access. Live always requires actual account truth.
+    def _account(
+        self, markets: list[str]
+    ) -> tuple[Decimal, Decimal, Decimal]:
         if not self._private_account_enabled():
             return self._fallback_account()
-
         if not self.client.api_key or not self.client.api_secret:
             if self.mode == "live":
                 raise BitvavoError(
                     "Private Bitvavo credentials are required in live mode"
                 )
             return self._fallback_account()
-
         try:
             balances = self.client.balances()
         except BitvavoError:
             if self.mode == "live":
                 raise
             return self._fallback_account()
-
         by_symbol = {
             str(x.get("symbol")): (
                 Decimal(str(x.get("available", "0")))
@@ -176,43 +253,52 @@ class ProactiveTrader:
             )
             for x in balances
         }
-
         cash = by_symbol.get("EUR", Decimal("0"))
         equity = cash
         exposure = Decimal("0")
-
         for market in markets:
             base = market.split("-", 1)[0]
             amount = by_symbol.get(base, Decimal("0"))
-
             if amount <= 0:
                 continue
-
             try:
+                bundle = self.crypto.market_bundle(
+                    market,
+                    "1h",
+                    mode=self.mode,
+                    persist=False,
+                    depth=5,
+                )
                 price = Decimal(
-                    str(self.client.ticker_book(market).get("bid") or "0")
+                    str(bundle.microstructure.get("best_bid") or "0")
                 )
             except Exception:
                 price = Decimal("0")
-
             value = amount * price
             equity += value
             exposure += value
-
         if equity <= 0:
             if self.mode == "live":
                 raise BitvavoError(
                     "Authenticated Bitvavo account returned no usable equity"
                 )
             return self._fallback_account()
-
         return equity, cash, exposure
 
     def _news(self):
-        docs = discover_crypto_repo_documents(self.settings.crypto_repo_root)
+        now = time.time()
+        ttl = float(
+            self.settings.proactive.get("nlp_cache_seconds", 300)
+        )
+        if self._news_cache and now - self._news_cache[0] <= ttl:
+            return list(self._news_cache[1])
+        docs = discover_crypto_repo_documents(
+            self.settings.crypto_repo_root
+        )
         rss_urls = list(self.settings.nlp.get("rss_urls", []) or [])
         if rss_urls:
             docs.extend(fetch_rss_documents(rss_urls))
+        self._news_cache = (now, list(docs))
         return docs
 
     @staticmethod
@@ -231,44 +317,81 @@ class ProactiveTrader:
         if total_amount > 0:
             return total_quote / total_amount
         filled = Decimal(str(order.get("filledAmount") or "0"))
-        quote = Decimal(str(order.get("filledAmountQuote") or "0"))
+        quote = Decimal(
+            str(order.get("filledAmountQuote") or "0")
+        )
         return quote / filled if filled > 0 else Decimal("0")
 
     def _execute_buy(self, intent: TradeIntent) -> dict[str, Any]:
         if self.mode != "live":
-            return {"mode": self.mode, "simulated": True, "intent_id": intent.intent_id}
+            return {
+                "mode": self.mode,
+                "simulated": True,
+                "intent_id": intent.intent_id,
+                "execution_backend": "shadow_or_paper",
+            }
         gate = live_gate_status(self.settings.execution)
         if not gate.ready:
-            return {"mode": "live", "accepted": False, "blockers": list(gate.blockers)}
-        order = self.client.place_market_buy(intent.market, intent.notional_eur, client_order_id=intent.intent_id)
-        self.state.record_order(intent.intent_id, intent.market, "BUY", order)
-        amount = Decimal(str(order.get("filledAmount") or "0"))
-        entry = self._avg_fill_price(order)
-        if amount > 0 and entry > 0:
-            self.state.upsert_position(
-                Position(intent.market, amount, entry, entry, intent.stop_pct, intent.take_profit_pct, intent.trailing_stop_pct, datetime.now(timezone.utc).isoformat())
-            )
-        return order
+            return {
+                "mode": "live",
+                "accepted": False,
+                "blockers": list(gate.blockers),
+            }
+        # The existing crypto repository owns execution authority. Do not
+        # bypass it with the temporary direct Bitvavo client.
+        interfaces = self.crypto.execution_authority_interfaces()
+        return {
+            "mode": "live",
+            "accepted": False,
+            "blockers": ["CRYPTO_EXECUTION_AUTHORITY_ADAPTER_NOT_MAPPED"],
+            "execution_backend": "core.execution_authority",
+            "available_interfaces": interfaces,
+        }
 
     def _manage_exits(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        balances = self.client.balances() if self.mode == "live" else []
-        available = {str(x.get("symbol")): Decimal(str(x.get("available", "0"))) for x in balances}
         for market, pos in list(self.state.positions().items()):
             try:
-                book = self.client.ticker_book(market)
-                price = Decimal(str(book.get("bid") or book.get("ask") or "0"))
+                bundle = self.crypto.market_bundle(
+                    market,
+                    "1h",
+                    mode=self.mode,
+                    persist=False,
+                    depth=5,
+                )
+                price = Decimal(
+                    str(
+                        bundle.microstructure.get("best_bid")
+                        or bundle.microstructure.get("best_ask")
+                        or "0"
+                    )
+                )
             except Exception:
                 continue
             if price <= 0:
                 continue
             highest = max(pos.highest_price, price)
             if highest != pos.highest_price:
-                pos = Position(pos.market, pos.amount, pos.entry_price, highest, pos.stop_pct, pos.take_profit_pct, pos.trailing_stop_pct, pos.opened_at)
+                pos = Position(
+                    pos.market,
+                    pos.amount,
+                    pos.entry_price,
+                    highest,
+                    pos.stop_pct,
+                    pos.take_profit_pct,
+                    pos.trailing_stop_pct,
+                    pos.opened_at,
+                )
                 self.state.upsert_position(pos)
-            hard_stop = pos.entry_price * (Decimal("1") - Decimal(str(pos.stop_pct)))
-            target = pos.entry_price * (Decimal("1") + Decimal(str(pos.take_profit_pct)))
-            trailing = highest * (Decimal("1") - Decimal(str(pos.trailing_stop_pct)))
+            hard_stop = pos.entry_price * (
+                Decimal("1") - Decimal(str(pos.stop_pct))
+            )
+            target = pos.entry_price * (
+                Decimal("1") + Decimal(str(pos.take_profit_pct))
+            )
+            trailing = highest * (
+                Decimal("1") - Decimal(str(pos.trailing_stop_pct))
+            )
             reason = None
             if price <= hard_stop:
                 reason = "STOP_LOSS"
@@ -279,59 +402,229 @@ class ProactiveTrader:
             if not reason:
                 continue
             if self.mode == "live":
-                gate = live_gate_status(self.settings.execution)
-                if not gate.ready:
-                    events.append({"market": market, "action": "EXIT_BLOCKED", "reason": reason, "blockers": list(gate.blockers)})
-                    continue
-                base = market.split("-", 1)[0]
-                amount = min(pos.amount, available.get(base, pos.amount))
-                if amount <= 0:
-                    self.state.delete_position(market)
-                    continue
-                order = self.client.place_market_sell(market, amount)
-                self.state.record_order(None, market, "SELL", {"reason": reason, **order})
-                events.append({"market": market, "action": "SELL", "reason": reason, "order": order})
-            else:
-                events.append({"market": market, "action": "SIMULATED_SELL", "reason": reason})
+                events.append(
+                    {
+                        "market": market,
+                        "action": "EXIT_BLOCKED",
+                        "reason": reason,
+                        "blockers": [
+                            "CRYPTO_EXECUTION_AUTHORITY_ADAPTER_NOT_MAPPED"
+                        ],
+                    }
+                )
+                continue
+            events.append(
+                {
+                    "market": market,
+                    "action": "SIMULATED_SELL",
+                    "reason": reason,
+                }
+            )
             self.state.delete_position(market)
         return events
+
+    @staticmethod
+    def _trend_component(frame: pd.DataFrame) -> float:
+        if frame is None or frame.empty or "close" not in frame:
+            return 0.0
+        close = pd.to_numeric(frame["close"], errors="coerce").dropna()
+        if len(close) < 20:
+            return 0.0
+        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = (
+            close.ewm(span=50, adjust=False).mean().iloc[-1]
+            if len(close) >= 50
+            else close.mean()
+        )
+        last = close.iloc[-1]
+        bullish = float(last > ema20) + float(ema20 > ema50)
+        bearish = float(last < ema20) + float(ema20 < ema50)
+        return float(np.clip((bullish - bearish) / 2.0, -1.0, 1.0))
+
+    @classmethod
+    def _mtf_score(cls, frames: dict[str, pd.DataFrame]) -> float:
+        weights = {
+            "15m": 0.05,
+            "1h": 0.15,
+            "2h": 0.15,
+            "4h": 0.25,
+            "1d": 0.25,
+            "1w": 0.15,
+        }
+        total = 0.0
+        used = 0.0
+        for timeframe, weight in weights.items():
+            frame = frames.get(timeframe)
+            if frame is None or frame.empty:
+                continue
+            total += cls._trend_component(frame) * weight
+            used += weight
+        return float(np.clip(total / used, -1.0, 1.0)) if used else 0.0
+
+    @staticmethod
+    def _orderflow_score(micro: dict[str, float]) -> float:
+        book = float(micro.get("book_imbalance", 0.0))
+        cvd = float(micro.get("cvd_ratio", 0.0))
+        micro_edge = float(micro.get("microprice_edge_bps", 0.0))
+        edge_scaled = float(np.tanh(micro_edge / 10.0))
+        return float(
+            np.clip(0.45 * book + 0.35 * cvd + 0.20 * edge_scaled, -1.0, 1.0)
+        )
+
+    def _persist_market_data(self) -> bool:
+        return bool(
+            self.settings.proactive.get(
+                f"market_data_persist_{self.mode}",
+                self.mode != "shadow",
+            )
+        )
 
     def cycle(self) -> dict[str, Any]:
         markets = self._markets()
         exit_events = self._manage_exits()
         docs = self._news()
-        frames = {}
-        spreads = {}
-        context = {}
-        skipped = []
+        frames: dict[str, pd.DataFrame] = {}
+        spreads: dict[str, float] = {}
+        context: dict[str, dict] = {}
+        skipped: list[dict] = []
+        mtf_summary: dict[str, dict[str, int]] = {}
+        persist = self._persist_market_data()
+        timeframes = tuple(
+            str(x)
+            for x in self.settings.proactive.get(
+                "timeframes",
+                ["15m", "1h", "2h", "4h", "1d", "1w"],
+            )
+        )
+        primary = str(
+            self.settings.proactive.get(
+                "primary_signal_timeframe", "1h"
+            )
+        )
+        depth = int(
+            self.settings.proactive.get("orderbook_depth", 100)
+        )
+
+        library_status = self.crypto.integration_status()
+        prospective_context: dict[str, Any] = {}
+        prospective_error: str | None = None
+        try:
+            prospective_context = self.crypto.prospective_context(
+                markets,
+                cache_seconds=float(
+                    self.settings.proactive.get(
+                        "prospective_context_cache_seconds", 300
+                    )
+                ),
+            )
+        except Exception as exc:
+            prospective_error = (
+                f"{type(exc).__name__}: {str(exc)[:300]}"
+            )
+        try:
+            micro_readiness = self.crypto.microstructure_readiness()
+        except Exception as exc:
+            micro_readiness = {
+                "status": "UNAVAILABLE",
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            }
+
+        prospective_status = str(
+            prospective_context.get("status") or "UNKNOWN"
+        ).upper()
+        prospective_block = prospective_status in {
+            "BLOCK_NEW_ENTRIES",
+            "BLOCKED",
+            "FAILED",
+            "NOT_READY",
+        }
 
         for market in markets:
             try:
-                frame = self.client.candles(market, interval="1h", limit=int(self.settings.proactive.get("candle_limit", 600)))
-                if frame.empty:
-                    skipped.append({"market": market, "reason": "NO_CANDLES"})
+                bundle = self.crypto.market_bundle(
+                    market,
+                    primary,
+                    mode=self.mode,
+                    persist=persist,
+                    depth=depth,
+                )
+                if bundle.frame.empty:
+                    skipped.append(
+                        {"market": market, "reason": "NO_CANDLES"}
+                    )
                     continue
-                ticker = self.client.ticker_24h(market)
-                quote_volume = float(ticker.get("volumeQuote") or 0.0)
+                mtf_frames = self.crypto.multi_timeframe_frames(
+                    market,
+                    timeframes,
+                    persist=persist,
+                )
+                mtf_frames[primary] = bundle.frame
+                mtf = self._mtf_score(mtf_frames)
+                orderflow = self._orderflow_score(bundle.microstructure)
+                quote_volume = float(
+                    bundle.ticker.get("volumeQuote")
+                    or bundle.ticker.get("quote_volume")
+                    or bundle.ticker.get("volume_quote")
+                    or 0.0
+                )
+                frame = bundle.frame.copy()
                 frame["quote_volume_24h"] = quote_volume
-                book = self.client.ticker_book(market)
-                bid = float(book.get("bid") or 0.0)
-                ask = float(book.get("ask") or 0.0)
-                spreads[market] = ((ask - bid) / ((ask + bid) / 2.0) * 10000.0) if bid > 0 and ask > 0 else 999.0
+                spreads[market] = float(
+                    bundle.microstructure.get("spread_bps", 999.0)
+                )
                 assessment = self.nlp.aggregate(docs, market)
+                entry_blocked = bool(
+                    prospective_block
+                    and self.settings.proactive.get(
+                        "context_gates", {}
+                    ).get("block_on_prospective_context_block", True)
+                )
                 context[market] = {
                     "nlp_score": assessment.score,
                     "nlp_confidence": assessment.confidence,
                     "nlp_severe_negative": assessment.severe_negative,
                     "event_tags": list(assessment.event_tags),
                     "nlp_model": assessment.model,
+                    "mtf_score": mtf,
+                    "orderflow_score": orderflow,
+                    "book_imbalance": bundle.microstructure.get(
+                        "book_imbalance", 0.0
+                    ),
+                    "cvd_ratio": bundle.microstructure.get(
+                        "cvd_ratio", 0.0
+                    ),
+                    "microprice_edge_bps": bundle.microstructure.get(
+                        "microprice_edge_bps", 0.0
+                    ),
+                    "spread_bps": bundle.microstructure.get(
+                        "spread_bps", 999.0
+                    ),
+                    "prospective_context_status": prospective_status,
+                    "entry_blocked": entry_blocked,
+                    "data_source": "Sjagil/crypto",
+                }
+                mtf_summary[market] = {
+                    tf: len(mtf_frames.get(tf, pd.DataFrame()))
+                    for tf in timeframes
                 }
                 frames[market] = frame
             except Exception as exc:
-                skipped.append({"market": market, "reason": type(exc).__name__, "detail": str(exc)[:240]})
+                skipped.append(
+                    {
+                        "market": market,
+                        "reason": type(exc).__name__,
+                        "detail": str(exc)[:300],
+                    }
+                )
 
         equity, cash, exposure = self._account(markets)
-        authority = Authority.LIVE if self.mode == "live" else Authority.PAPER if self.mode == "paper" else Authority.SHADOW
+        authority = (
+            Authority.LIVE
+            if self.mode == "live"
+            else Authority.PAPER
+            if self.mode == "paper"
+            else Authority.SHADOW
+        )
         result = SwingPipeline(self.settings).run(
             frames,
             equity_eur=equity,
@@ -347,33 +640,83 @@ class ProactiveTrader:
         positions = self.state.positions()
         for intent in result.intents:
             frame = frames.get(intent.market)
-            if frame is None or frame.empty or intent.market in positions:
+            if (
+                frame is None
+                or frame.empty
+                or intent.market in positions
+            ):
                 continue
             candle_ts = frame.index[-1].isoformat()
             if self.state.seen(intent.market, candle_ts, "BUY"):
                 continue
             execution = self._execute_buy(intent)
-            self.state.mark(intent.market, candle_ts, "BUY", {"intent": intent.to_dict(), "execution": execution})
-            executions.append({"intent": intent.to_dict(), "execution": execution})
+            self.state.mark(
+                intent.market,
+                candle_ts,
+                "BUY",
+                {
+                    "intent": intent.to_dict(),
+                    "execution": execution,
+                },
+            )
+            executions.append(
+                {"intent": intent.to_dict(), "execution": execution}
+            )
 
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode,
+            "data_source": "Sjagil/crypto python library",
             "markets": markets,
             "equity_eur": str(equity),
             "cash_eur": str(cash),
             "exposure_eur": str(exposure),
             "nlp_documents": len(docs),
-            "signals": [{"market": s.market, "side": s.side.value, "score": s.score, "edge_bps": s.expected_edge_bps} for s in result.signals],
+            "crypto_library_ready": library_status.get("ready", False),
+            "crypto_library_imported_modules": library_status.get(
+                "imported_modules", 0
+            ),
+            "crypto_library_required_modules": library_status.get(
+                "required_modules", 0
+            ),
+            "prospective_context_status": prospective_status,
+            "prospective_context_error": prospective_error,
+            "microstructure_readiness": micro_readiness,
+            "mtf_rows": mtf_summary,
+            "signals": [
+                {
+                    "market": s.market,
+                    "side": s.side.value,
+                    "score": s.score,
+                    "edge_bps": s.expected_edge_bps,
+                    "votes": [v.source for v in s.votes],
+                }
+                for s in result.signals
+            ],
+            "market_context": context,
             "blocked": result.blocked,
             "executions": executions,
             "exit_events": exit_events,
             "skipped": skipped,
-            "positions": {k: {**asdict(v), "amount": str(v.amount), "entry_price": str(v.entry_price), "highest_price": str(v.highest_price)} for k, v in self.state.positions().items()},
+            "positions": {
+                k: {
+                    **asdict(v),
+                    "amount": str(v.amount),
+                    "entry_price": str(v.entry_price),
+                    "highest_price": str(v.highest_price),
+                }
+                for k, v in self.state.positions().items()
+            },
         }
-        out = self.settings.project_root / "output/crypto_ai_swing/proactive/latest.json"
+        out = (
+            self.settings.project_root
+            / "output/crypto_ai_swing/proactive/latest.json"
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        out.write_text(
+            json.dumps(payload, indent=2, default=str),
+            encoding="utf-8",
+        )
         return payload
 
     def run_forever(self, interval_seconds: int = 60) -> None:
@@ -384,9 +727,24 @@ class ProactiveTrader:
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
-                out = self.settings.project_root / "output/crypto_ai_swing/proactive/errors.jsonl"
+                out = (
+                    self.settings.project_root
+                    / "output/crypto_ai_swing/proactive/errors.jsonl"
+                )
                 out.parent.mkdir(parents=True, exist_ok=True)
                 with out.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "error": type(exc).__name__, "detail": str(exc)[:1000]}) + "\n")
-            sleep_for = max(1.0, float(interval_seconds) - (time.time() - started))
+                    fh.write(
+                        json.dumps(
+                            {
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "error": type(exc).__name__,
+                                "detail": str(exc)[:1000],
+                            }
+                        )
+                        + "\n"
+                    )
+            sleep_for = max(
+                1.0,
+                float(interval_seconds) - (time.time() - started),
+            )
             time.sleep(sleep_for)
