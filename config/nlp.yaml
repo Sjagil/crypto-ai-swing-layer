@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_nlp_v1
+schema: crypto_ai_swing_nlp_v2
 enabled: true
 model: ProsusAI/finbert
 transformer_enabled: true
@@ -6,6 +6,11 @@ half_life_hours: 12
 maximum_age_hours: 72
 maximum_score_adjustment: 0.12
 severe_negative_veto: true
+severe_veto_direct_asset_only: true
+direct_asset_weight: 1.0
+btc_cross_asset_weight: 0.20
+macro_weight: 0.25
+generic_weight: 0.10
 rss_urls: []
 asset_aliases:
   BTC: [bitcoin, btc]

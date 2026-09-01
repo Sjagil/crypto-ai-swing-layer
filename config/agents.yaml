@@ -1,0 +1,32 @@
+schema: crypto_ai_swing_agents_v3
+enabled: true
+training_markets: []
+training_market_source: runtime_universe_25
+timeframe: 1h
+horizon_bars: 4
+minimum_rows: 8000
+minimum_net_move_bps: 65.0
+artifact_status_after_training: SHADOW
+shadow_decision_requires_oos_qualification: true
+live_decision_influence: false
+automatic_canary_promotion: false
+automatic_active_promotion: false
+qualification:
+  minimum_validation_selected: 40
+  minimum_test_selected: 60
+  minimum_validation_markets: 5
+  minimum_test_markets: 6
+  minimum_test_positive_market_fraction: 0.50
+  minimum_validation_alpha_auc: 0.52
+  minimum_test_alpha_auc: 0.50
+  minimum_validation_regime_auc: 0.52
+  minimum_test_regime_auc: 0.50
+  minimum_validation_return_skill: 0.02
+  minimum_test_return_skill: 0.00
+rl:
+  enabled: false
+  algorithm: PPO
+  long_only: true
+  leverage: false
+  shorting: false
+  live_decision_influence: false

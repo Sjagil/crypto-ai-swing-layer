@@ -1,9 +1,9 @@
-schema: crypto_ai_swing_execution_v2
+schema: crypto_ai_swing_execution_v3
 
 authority:
   default_mode: shadow
   strategy_direct_exchange_calls: false
-  broker_submission_enabled: true
+  broker_submission_enabled: false
   automatic_live_promotion: false
   withdrawals_enabled: false
 
@@ -22,7 +22,7 @@ edge_gate:
 liquidity:
   maximum_participation_rate: 0.05
   minimum_24h_quote_volume_eur: 250000
-  maximum_spread_bps: 80
+  maximum_spread_bps: 35
   reject_stale_orderbook: true
   maximum_market_state_age_seconds: 20
 
@@ -33,7 +33,21 @@ execution:
   external_adapter_command: []
 
 execution_adapter:
-  mode: direct_bitvavo
+  mode: crypto_execution_authority
+  direct_bitvavo_fallback: false
+  live_submission_enabled: false
   intent_directory: output/crypto_ai_swing/trade_intents
   command: []
   live_command: []
+
+swing_canary:
+  native_crypto_authority: true
+  maximum_order_eur: 10
+  maximum_total_exposure_eur: 10
+  maximum_positions: 1
+  maximum_new_orders_per_day: 1
+  maximum_risk_per_trade_eur: 1
+  maximum_slippage_bps: 25
+  native_exchange_stop_required: true
+  autoscale: false
+  automatic_authority: false

@@ -34,6 +34,9 @@ class Settings:
     compliance: dict
     nlp: dict
     proactive: dict
+    autonomy: dict
+    agents: dict
+    supervisor: dict
 
     @classmethod
     def load(cls, project_root: Path | None = None) -> "Settings":
@@ -58,4 +61,7 @@ class Settings:
             compliance=load_yaml(cfg / "compliance.yaml"),
             nlp=load_yaml(cfg / "nlp.yaml"),
             proactive=load_yaml(cfg / "proactive.yaml"),
+            autonomy=load_yaml(cfg / "autonomy.yaml"),
+            agents=load_yaml(cfg / "agents.yaml"),
+            supervisor=load_yaml(cfg / "supervisor.yaml"),
         )
