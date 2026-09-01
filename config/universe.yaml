@@ -1,10 +1,25 @@
-schema: crypto_ai_swing_universe_v1
+schema: crypto_ai_swing_universe_v3
 
 exchange:
   primary: bitvavo
   quote: EUR
   require_native_market: true
   require_trading_status: true
+
+runtime_selection:
+  enabled: true
+  size: 25
+  quote: EUR
+  refresh_seconds: 21600
+  minimum_24h_quote_volume_eur: 250000
+  preferred_maximum_spread_bps: 15
+  maximum_spread_bps: 35
+  core_markets: [BTC-EUR, ETH-EUR, SOL-EUR]
+  state_path: output/crypto_ai_swing/universe/latest.json
+  shariah_filter: native_crypto_repo
+  exclude_stablecoins: true
+  exclude_leveraged_tokens: true
+  current_liquidity_snapshot_not_point_in_time: true
 
 discovery:
   cmc_point_in_time: true
@@ -16,7 +31,7 @@ discovery:
 hard_filters:
   minimum_24h_quote_volume_eur: 250000
   minimum_market_cap_usd: 50000000
-  maximum_spread_bps: 80
+  maximum_spread_bps: 35
   minimum_data_quality: 0.70
   minimum_history_days: 180
 

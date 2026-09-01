@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_autonomy_v2
+schema: crypto_ai_swing_autonomy_v4
 
 control_plane:
   fail_closed: true
@@ -22,6 +22,15 @@ forward_evidence:
   record_live: true
   mature_on_cycle: true
   horizons_hours: [1, 4, 24]
+  decision_bucket_minutes: 15
+  outcome_schema: observed_time_next_open_v2
+  canary_readiness:
+    primary_horizon_hours: 4
+    minimum_unblocked_buy_outcomes: 30
+    minimum_distinct_markets: 5
+    minimum_observation_span_hours: 72
+    minimum_mean_return_bps: 0.0
+    minimum_positive_return_rate: 0.50
 
 research:
   native_crypto_factory: true
@@ -32,6 +41,9 @@ research:
   default_factory_trials: 2000
   native_campaign_default_exact: false
   native_campaign_maximum_rows: 20000
+  cold_start_walk_forward_folds: 3
+  cold_start_final_holdout_fraction: 0.20
+  cold_start_max_finalists_per_family: 2
 
 causality:
   enforce_closed_candles: true

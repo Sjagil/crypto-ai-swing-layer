@@ -45,3 +45,6 @@ secrets.json
 # Build/package artifacts
 *.egg-info/
 *.bak
+# Local upgrade backups and atomic temp files
+.round*_backups/
+*.round*.tmp

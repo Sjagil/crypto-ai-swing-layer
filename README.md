@@ -288,3 +288,26 @@ python -m crypto_ai_swing.cli forward-report
 2,000 candidates have passed exact backtests. `research-run` invokes the canonical
 Sjagil/crypto research factory. Exact validation is explicit with `--exact`. Neither
 path grants paper or live authority automatically.
+
+## Round 5 autonomous agents and native canary
+
+The swing layer now contains causal SHADOW agents, continuous retraining and
+research supervision, and a native micro-live bridge into `Sjagil/crypto`.
+The first canary is hard capped at EUR 10 total exposure and one position.
+A filled entry must receive an exchange-native stop or the bridge attempts an
+immediate risk-reducing flatten.
+
+Applying Round 5 does not arm live trading. SHADOW models have
+`live_decision_influence=false` and there is no automatic live promotion.
+
+## Round 6 runtime universe
+
+The live/shadow scanner now maintains a dynamic 25-market Bitvavo EUR spot universe. All 25 markets receive a closed-1h screen; only the strongest eight plus open positions receive the expensive MTF/orderflow/NLP stack. Agent training uses the same 25-market universe. Weak SHADOW agents remain advisory instead of vetoing decisions. Cold-start research runs independently while canonical P0.5 economics has no closed family episodes.
+
+## Round 7 evidence and quality hardening
+
+Round 7 tightens runtime spreads, adds per-head agent qualification, removes final-test candidate ranking from cold-start research and introduces observed-time forward outcome maturation. Legacy forward outcomes remain preserved but are excluded from the current causal report. Live authority remains explicit and disarmed by default.
+
+## Round 8 prospective calibration and walk-forward research
+
+Round 8 adds a prospective 4h BUY evidence gate for the EUR 10 live canary, richer predicted-versus-realized edge calibration, three development-only temporal research windows, a broader bounded classical candidate grid, family-diversified final holdout selection, and a second live submission guard inside the proactive trader. Automatic live promotion and autoscaling remain disabled.

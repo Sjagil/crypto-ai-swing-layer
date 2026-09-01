@@ -54,19 +54,19 @@ def build_signal(
 ) -> Signal:
     dscore, family = deterministic_score(row)
     votes = [ModelVote("deterministic", dscore, 0.75)]
-    weighted = dscore * 0.45
-    weight = 0.45
+    weighted = dscore * 0.60
+    weight = 0.60
 
     if ml_probability is not None and np.isfinite(ml_probability):
         votes.append(
             ModelVote("supervised_ml", float(ml_probability), 0.70)
         )
-        weighted += float(ml_probability) * 0.30
-        weight += 0.30
+        weighted += float(ml_probability) * 0.20
+        weight += 0.20
     if forecast_score is not None and np.isfinite(forecast_score):
         votes.append(ModelVote("forecast", float(forecast_score), 0.60))
-        weighted += float(forecast_score) * 0.15
-        weight += 0.15
+        weighted += float(forecast_score) * 0.10
+        weight += 0.10
     if rl_score is not None and np.isfinite(rl_score):
         votes.append(ModelVote("rl_challenger", float(rl_score), 0.40))
         weighted += float(rl_score) * 0.10

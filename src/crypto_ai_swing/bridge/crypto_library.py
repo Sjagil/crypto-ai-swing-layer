@@ -546,6 +546,48 @@ class CryptoLibraryBridge:
             self._ohlcv_async(market, timeframe, persist=persist)
         )
 
+    async def _ohlcv_many_async(
+        self,
+        markets: Iterable[str],
+        timeframe: str,
+        *,
+        persist: bool,
+        concurrency: int,
+    ) -> dict[str, pd.DataFrame]:
+        semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+
+        async def one(market: str):
+            async with semaphore:
+                try:
+                    frame = await self._ohlcv_async(
+                        market, timeframe, persist=persist
+                    )
+                    return market, frame, None
+                except Exception as exc:
+                    return market, pd.DataFrame(), exc
+
+        rows = await asyncio.gather(
+            *(one(str(market).upper()) for market in markets)
+        )
+        result: dict[str, pd.DataFrame] = {}
+        for market, frame, _error in rows:
+            result[market] = frame
+        return result
+
+    def ohlcv_many(
+        self,
+        markets: Iterable[str],
+        timeframe: str,
+        *,
+        persist: bool = False,
+        concurrency: int = 4,
+    ) -> dict[str, pd.DataFrame]:
+        return self._run(
+            self._ohlcv_many_async(
+                markets, timeframe, persist=persist, concurrency=concurrency
+            )
+        )
+
     async def _market_bundle_async(
         self,
         market: str,

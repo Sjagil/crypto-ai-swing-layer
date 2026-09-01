@@ -1,5 +1,6 @@
-schema: crypto_ai_swing_proactive_v2
-markets: [BTC-EUR, ETH-EUR, SOL-EUR]
+schema: crypto_ai_swing_proactive_v4
+markets: []
+universe_source: runtime_top_25
 interval_seconds: 60
 candle_limit: 600
 shadow_equity_eur: 10000
@@ -18,6 +19,12 @@ market_data_persist_paper: true
 market_data_persist_live: true
 nlp_cache_seconds: 300
 prospective_context_cache_seconds: 300
+
+# 25 markets are screened cheaply on 1h closed bars. Only the strongest
+# candidates plus open positions receive full MTF/orderflow enrichment.
+deep_scan_limit: 8
+screen_spread_quality_scale_bps: 15
+screen_concurrency: 4
 
 context_gates:
   block_on_prospective_context_block: true

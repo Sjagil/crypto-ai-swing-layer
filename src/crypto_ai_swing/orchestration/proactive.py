@@ -30,6 +30,9 @@ from crypto_ai_swing.nlp.sources import (
 from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
+from crypto_ai_swing.agents.runtime import AgentRuntime
+from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
+from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
 
 
 @dataclass(frozen=True)
@@ -203,7 +206,13 @@ class ProactiveTrader:
         forward_rel = forward_cfg.get(
             "path", "output/crypto_ai_swing/forward/forward.sqlite"
         )
-        self.forward = ForwardEvidenceLedger(settings.project_root / forward_rel)
+        self.forward = ForwardEvidenceLedger(
+            settings.project_root / forward_rel,
+            decision_bucket_minutes=int(forward_cfg.get("decision_bucket_minutes", 15)),
+        )
+        self.agents = AgentRuntime(settings, mode=self.mode)
+        self.execution_authority = CryptoAuthorityAdapter(settings.crypto_repo_root)
+        self.universe = UniverseManager(settings)
         self._news_cache: tuple[float, list] | None = None
         self._last_news_status: dict[str, Any] = {
             "status": "NOT_RUN",
@@ -221,15 +230,20 @@ class ProactiveTrader:
 
         raw = os.getenv("CRYPTO_SWING_MARKETS")
         if raw:
-            return [
-                x.strip().upper()
-                for x in raw.split(",")
-                if x.strip()
+            values = [x.strip().upper() for x in raw.split(",") if x.strip()]
+        else:
+            configured = [
+                str(x).upper()
+                for x in (self.settings.proactive.get("markets", []) or [])
+                if str(x).strip()
             ]
-        values = self.settings.proactive.get(
-            "markets", ["BTC-EUR", "ETH-EUR", "SOL-EUR"]
-        )
-        return [str(x).upper() for x in values]
+            values = configured or list(self.universe.current()["markets"])
+        # Never stop managing a locally open position just because universe
+        # membership changes at the next six-hour refresh.
+        for market in self.state.positions():
+            if market not in values:
+                values.append(market)
+        return values
 
     def _fallback_account(self) -> tuple[Decimal, Decimal, Decimal]:
         fallback = Decimal(
@@ -255,6 +269,33 @@ class ProactiveTrader:
     def _account(
         self, markets: list[str]
     ) -> tuple[Decimal, Decimal, Decimal]:
+        if self.mode == "live":
+            authority = getattr(self, "execution_authority", None)
+            if authority is not None:
+                try:
+                    snapshot = authority.account_snapshot(markets)
+                except BitvavoError:
+                    raise
+                except Exception as exc:
+                    raise BitvavoError(
+                        "Canonical crypto account snapshot unavailable: "
+                        f"{type(exc).__name__}: {str(exc)[:300]}"
+                    ) from exc
+                if snapshot.get("status") != "READY":
+                    raise BitvavoError(
+                        "Canonical crypto account health is not READY: "
+                        + ",".join(
+                            str(x) for x in snapshot.get("failures", [])
+                        )
+                    )
+                return (
+                    Decimal(str(snapshot.get("equity_eur") or "0")),
+                    Decimal(str(snapshot.get("cash_eur") or "0")),
+                    Decimal(str(snapshot.get("exposure_eur") or "0")),
+                )
+            # Compatibility/fail-closed path for tests or partially
+            # constructed instances. Production __init__ installs the native
+            # execution authority adapter.
         if not self._private_account_enabled():
             return self._fallback_account()
         if not self.client.api_key or not self.client.api_secret:
@@ -373,31 +414,83 @@ class ProactiveTrader:
         )
         return quote / filled if filled > 0 else Decimal("0")
 
+    def _prospective_canary_readiness(self) -> dict[str, Any]:
+        forward_cfg = (
+            self.settings.autonomy.get("forward_evidence", {})
+            if hasattr(self.settings, "autonomy")
+            else {}
+        )
+        cfg = dict(forward_cfg.get("canary_readiness", {}) or {})
+        return self.forward.canary_readiness(
+            primary_horizon_hours=int(cfg.get("primary_horizon_hours", 4)),
+            minimum_unblocked_buy_outcomes=int(
+                cfg.get("minimum_unblocked_buy_outcomes", 30)
+            ),
+            minimum_distinct_markets=int(cfg.get("minimum_distinct_markets", 5)),
+            minimum_observation_span_hours=float(
+                cfg.get("minimum_observation_span_hours", 72)
+            ),
+            minimum_mean_return_bps=float(
+                cfg.get("minimum_mean_return_bps", 0.0)
+            ),
+            minimum_positive_return_rate=float(
+                cfg.get("minimum_positive_return_rate", 0.50)
+            ),
+        )
+
     def _execute_buy(self, intent: TradeIntent) -> dict[str, Any]:
         if self.mode != "live":
             return {
                 "mode": self.mode,
                 "simulated": True,
+                "accepted": True,
                 "intent_id": intent.intent_id,
                 "execution_backend": "shadow_or_paper",
             }
-        gate = live_gate_status(self.settings.execution)
-        if not gate.ready:
+        readiness = self._prospective_canary_readiness()
+        if not bool(readiness.get("eligible")):
             return {
                 "mode": "live",
                 "accepted": False,
-                "blockers": list(gate.blockers),
+                "execution_backend": "prospective_canary_gate",
+                "reason_code": "PROSPECTIVE_CANARY_EVIDENCE_NOT_READY",
+                "blockers": list(readiness.get("blockers") or []),
+                "prospective_readiness": readiness,
+                "orders_submitted": 0,
             }
-        # The existing crypto repository owns execution authority. Do not
-        # bypass it with the temporary direct Bitvavo client.
-        interfaces = self.crypto.execution_authority_interfaces()
-        return {
-            "mode": "live",
-            "accepted": False,
-            "blockers": ["CRYPTO_EXECUTION_AUTHORITY_ADAPTER_NOT_MAPPED"],
-            "execution_backend": "core.execution_authority",
-            "available_interfaces": interfaces,
-        }
+        try:
+            result = self.execution_authority.submit_buy(intent)
+            return {"mode": "live", "accepted": result.accepted, "execution_backend": "Sjagil/crypto:core.swing_layer_live", **result.payload}
+        except Exception as exc:
+            return {"mode": "live", "accepted": False, "execution_backend": "Sjagil/crypto:core.swing_layer_live", "blockers": [f"{type(exc).__name__}:{str(exc)[:500]}"]}
+
+    def _sync_live_positions(self, markets: list[str]) -> None:
+        if self.mode != "live": return
+        try:
+            self.execution_authority.reconcile(markets)
+            canonical = dict(self.execution_authority.portfolio().get("positions") or {})
+        except Exception:
+            return
+        local = self.state.positions()
+        for market in list(local):
+            if market not in canonical: self.state.delete_position(market)
+        for market,row in canonical.items():
+            try:
+                amount=Decimal(str(row.get("quantity") or "0"));entry=Decimal(str(row.get("entry_price") or "0"))
+                stop=float(row.get("stop_pct") or .02);take=float(row.get("take_profit_pct") or max(.025,3*stop))
+                trailing=float(row.get("trailing_stop_pct") or max(.008,1.2*stop))
+            except Exception: continue
+            if amount<=0 or entry<=0: continue
+            existing=local.get(market);highest=max(existing.highest_price,entry) if existing else entry
+            self.state.upsert_position(Position(market,amount,entry,highest,stop,take,trailing,str(row.get("opened_at") or datetime.now(timezone.utc).isoformat())))
+
+    def _record_simulated_position(self, intent: TradeIntent, execution: dict[str, Any], frame: pd.DataFrame) -> None:
+        if self.mode == "live" or execution.get("accepted") is not True: return
+        try:
+            price=Decimal(str(frame["close"].iloc[-1])); amount=intent.notional_eur/price
+        except Exception: return
+        if price<=0 or amount<=0:return
+        self.state.upsert_position(Position(intent.market,amount,price,price,intent.stop_pct,intent.take_profit_pct,intent.trailing_stop_pct,datetime.now(timezone.utc).isoformat()))
 
     def _manage_exits(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -453,16 +546,12 @@ class ProactiveTrader:
             if not reason:
                 continue
             if self.mode == "live":
-                events.append(
-                    {
-                        "market": market,
-                        "action": "EXIT_BLOCKED",
-                        "reason": reason,
-                        "blockers": [
-                            "CRYPTO_EXECUTION_AUTHORITY_ADAPTER_NOT_MAPPED"
-                        ],
-                    }
-                )
+                try:
+                    result=self.execution_authority.submit_exit(market=market,reason=reason,quantity=str(pos.amount))
+                    events.append({"market":market,"action":"LIVE_EXIT","reason":reason,"accepted":result.accepted,"execution":result.payload})
+                    if result.accepted:self._sync_live_positions([market])
+                except Exception as exc:
+                    events.append({"market":market,"action":"EXIT_BLOCKED","reason":reason,"blockers":[f"{type(exc).__name__}:{str(exc)[:300]}"]})
                 continue
             events.append(
                 {
@@ -532,9 +621,15 @@ class ProactiveTrader:
 
     def cycle(self) -> dict[str, Any]:
         markets = self._markets()
+        universe_snapshot = self.universe.current()
+        universe_candidates = {
+            str(row.get("market")): dict(row)
+            for row in (universe_snapshot.get("candidates") or [])
+            if isinstance(row, dict) and row.get("market")
+        }
+        self._sync_live_positions(markets)
         exit_events = self._manage_exits()
         docs = self._news()
-        frames: dict[str, pd.DataFrame] = {}
         spreads: dict[str, float] = {}
         context: dict[str, dict] = {}
         skipped: list[dict] = []
@@ -543,74 +638,107 @@ class ProactiveTrader:
         timeframes = tuple(
             str(x)
             for x in self.settings.proactive.get(
-                "timeframes",
-                ["15m", "1h", "2h", "4h", "1d", "1w"],
+                "timeframes", ["15m", "1h", "2h", "4h", "1d", "1w"]
             )
         )
-        primary = str(
-            self.settings.proactive.get(
-                "primary_signal_timeframe", "1h"
-            )
-        )
-        depth = int(
-            self.settings.proactive.get("orderbook_depth", 100)
-        )
-
+        primary = str(self.settings.proactive.get("primary_signal_timeframe", "1h"))
+        depth = int(self.settings.proactive.get("orderbook_depth", 100))
+        deep_scan_limit = max(1, int(self.settings.proactive.get("deep_scan_limit", 8)))
+        concurrency = max(1, min(8, int(self.settings.proactive.get("screen_concurrency", 4))))
         library_status = self.crypto.integration_status()
+
+        # Stage A: screen the full 25-market universe with closed primary bars only.
+        try:
+            primary_frames = self.crypto.ohlcv_many(
+                markets, primary, persist=persist, concurrency=concurrency
+            )
+        except Exception as exc:
+            primary_frames = {}
+            skipped.append({"market": "UNIVERSE", "reason": type(exc).__name__, "detail": str(exc)[:300]})
+        screen: dict[str, dict[str, float]] = {}
+        primary_seconds = self.crypto.timeframe_seconds(primary)
+        causal_primary: dict[str, pd.DataFrame] = {}
+        for market in markets:
+            frame = primary_frames.get(market)
+            if frame is None or frame.empty:
+                skipped.append({"market": market, "reason": "NO_PRIMARY_SCREEN_CANDLES"})
+                continue
+            decision_at = frame.index[-1] + pd.to_timedelta(primary_seconds, unit="s")
+            causal = self.crypto.causal_frame(frame, primary, decision_at)
+            if causal.empty:
+                skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_SCREEN_CANDLE"})
+                continue
+            causal_primary[market] = causal
+            screen_row = screen_frame(causal)
+            universe_row = universe_candidates.get(market, {})
+            try:
+                spread_hint = float(universe_row.get("spread_bps"))
+            except (TypeError, ValueError):
+                spread_hint = 35.0
+            if not np.isfinite(spread_hint) or spread_hint < 0:
+                spread_hint = 35.0
+            spread_scale = max(1.0, float(
+                self.settings.proactive.get("screen_spread_quality_scale_bps", 15.0)
+            ))
+            execution_quality = float(np.exp(-spread_hint / spread_scale))
+            liquidity_component = 2.0 * execution_quality - 1.0
+            raw_score = float(screen_row.get("opportunity_score", -999.0))
+            screen_row.update({
+                "universe_spread_bps": spread_hint,
+                "universe_quality_tier": universe_row.get("quality_tier"),
+                "execution_quality": execution_quality,
+                "execution_adjusted_score": float(
+                    0.85 * raw_score + 0.15 * liquidity_component
+                ),
+            })
+            screen[market] = screen_row
+
+        ranked = sorted(
+            screen,
+            key=lambda market: float(
+                screen[market].get("execution_adjusted_score", -999.0)
+            ),
+            reverse=True,
+        )
+        open_markets = set(self.state.positions())
+        deep_markets: list[str] = []
+        for market in list(open_markets) + ranked:
+            if market in causal_primary and market not in deep_markets:
+                deep_markets.append(market)
+            if len(deep_markets) >= max(deep_scan_limit, len(open_markets)):
+                break
+
+        # Expensive context is limited to the highest-ranked markets plus open positions.
         prospective_context: dict[str, Any] = {}
         prospective_error: str | None = None
         try:
             prospective_context = self.crypto.prospective_context(
-                markets,
-                cache_seconds=float(
-                    self.settings.proactive.get(
-                        "prospective_context_cache_seconds", 300
-                    )
-                ),
+                deep_markets,
+                cache_seconds=float(self.settings.proactive.get("prospective_context_cache_seconds", 300)),
             )
         except Exception as exc:
-            prospective_error = (
-                f"{type(exc).__name__}: {str(exc)[:300]}"
-            )
+            prospective_error = f"{type(exc).__name__}: {str(exc)[:300]}"
         try:
             micro_readiness = self.crypto.microstructure_readiness()
         except Exception as exc:
-            micro_readiness = {
-                "status": "UNAVAILABLE",
-                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
-            }
+            micro_readiness = {"status": "UNAVAILABLE", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
-        prospective_status = str(
-            prospective_context.get("status") or "UNKNOWN"
-        ).upper()
-        prospective_block = prospective_status in {
-            "BLOCK_NEW_ENTRIES",
-            "BLOCKED",
-            "FAILED",
-            "NOT_READY",
-        }
+        prospective_status = str(prospective_context.get("status") or "UNKNOWN").upper()
+        prospective_block = prospective_status in {"BLOCK_NEW_ENTRIES", "BLOCKED", "FAILED", "NOT_READY"}
+        frames: dict[str, pd.DataFrame] = {}
 
-        for market in markets:
+        for market in deep_markets:
             try:
                 bundle = self.crypto.market_bundle(
-                    market,
-                    primary,
-                    mode=self.mode,
-                    persist=persist,
-                    depth=depth,
+                    market, primary, mode=self.mode, persist=persist, depth=depth
                 )
                 if bundle.frame.empty:
-                    skipped.append(
-                        {"market": market, "reason": "NO_CANDLES"}
-                    )
+                    skipped.append({"market": market, "reason": "NO_CANDLES"})
                     continue
                 mtf_frames = self.crypto.multi_timeframe_frames(
-                    market,
-                    timeframes,
-                    persist=persist,
+                    market, timeframes, persist=persist
                 )
                 mtf_frames[primary] = bundle.frame
-                primary_seconds = self.crypto.timeframe_seconds(primary)
                 decision_at = bundle.frame.index[-1] + pd.to_timedelta(primary_seconds, unit="s")
                 causal_frames = {
                     tf: self.crypto.causal_frame(frame, tf, decision_at)
@@ -621,21 +749,17 @@ class ProactiveTrader:
                     continue
                 mtf = self._mtf_score(causal_frames)
                 orderflow = self._orderflow_score(bundle.microstructure)
-                quote_volume = self.crypto.quote_volume_24h(
-                    bundle.ticker, bundle.microstructure
-                )
+                quote_volume = self.crypto.quote_volume_24h(bundle.ticker, bundle.microstructure)
                 frame = causal_frames[primary].copy()
                 frame["quote_volume_24h"] = quote_volume
-                spreads[market] = float(
-                    bundle.microstructure.get("spread_bps", 999.0)
-                )
+                spreads[market] = float(bundle.microstructure.get("spread_bps", 999.0))
                 nlp_aggregation = self.nlp.aggregate_with_diagnostics(docs, market)
                 assessment = nlp_aggregation.assessment
                 entry_blocked = bool(
                     prospective_block
-                    and self.settings.proactive.get(
-                        "context_gates", {}
-                    ).get("block_on_prospective_context_block", True)
+                    and self.settings.proactive.get("context_gates", {}).get(
+                        "block_on_prospective_context_block", True
+                    )
                 )
                 context[market] = {
                     "nlp_score": assessment.score,
@@ -646,70 +770,63 @@ class ProactiveTrader:
                     "nlp_diagnostics": nlp_aggregation.diagnostics,
                     "mtf_score": mtf,
                     "orderflow_score": orderflow,
-                    "book_imbalance": bundle.microstructure.get(
-                        "book_imbalance", 0.0
-                    ),
-                    "cvd_ratio": bundle.microstructure.get(
-                        "cvd_ratio", 0.0
-                    ),
-                    "cvd_notional_ratio": bundle.microstructure.get(
-                        "cvd_notional_ratio", 0.0
-                    ),
-                    "buy_volume": bundle.microstructure.get(
-                        "buy_volume", 0.0
-                    ),
-                    "sell_volume": bundle.microstructure.get(
-                        "sell_volume", 0.0
-                    ),
-                    "buy_notional": bundle.microstructure.get(
-                        "buy_notional", 0.0
-                    ),
-                    "sell_notional": bundle.microstructure.get(
-                        "sell_notional", 0.0
-                    ),
-                    "trade_count": bundle.microstructure.get(
-                        "trade_count", 0.0
-                    ),
-                    "classified_trade_count": bundle.microstructure.get(
-                        "classified_trade_count", 0.0
-                    ),
-                    "unclassified_trade_count": bundle.microstructure.get(
-                        "unclassified_trade_count", 0.0
-                    ),
+                    "book_imbalance": bundle.microstructure.get("book_imbalance", 0.0),
+                    "cvd_ratio": bundle.microstructure.get("cvd_ratio", 0.0),
+                    "cvd_notional_ratio": bundle.microstructure.get("cvd_notional_ratio", 0.0),
+                    "buy_volume": bundle.microstructure.get("buy_volume", 0.0),
+                    "sell_volume": bundle.microstructure.get("sell_volume", 0.0),
+                    "buy_notional": bundle.microstructure.get("buy_notional", 0.0),
+                    "sell_notional": bundle.microstructure.get("sell_notional", 0.0),
+                    "trade_count": bundle.microstructure.get("trade_count", 0.0),
+                    "classified_trade_count": bundle.microstructure.get("classified_trade_count", 0.0),
+                    "unclassified_trade_count": bundle.microstructure.get("unclassified_trade_count", 0.0),
                     "quote_volume_24h": quote_volume,
                     "decision_at": decision_at.isoformat(),
-                    "microprice_edge_bps": bundle.microstructure.get(
-                        "microprice_edge_bps", 0.0
-                    ),
-                    "spread_bps": bundle.microstructure.get(
-                        "spread_bps", 999.0
-                    ),
+                    "microprice_edge_bps": bundle.microstructure.get("microprice_edge_bps", 0.0),
+                    "spread_bps": bundle.microstructure.get("spread_bps", 999.0),
                     "prospective_context_status": prospective_status,
                     "entry_blocked": entry_blocked,
                     "data_source": "Sjagil/crypto",
+                    "universe_screen": screen.get(market, {}),
                 }
+                agent_decision = self.agents.predict_frame(market, frame, context[market])
+                context[market]["agents"] = {
+                    "alpha_probability": agent_decision.alpha_probability,
+                    "forecast_score": agent_decision.forecast_score,
+                    "regime_score": agent_decision.regime_score,
+                    "predicted_return": agent_decision.predicted_return,
+                    "predicted_mae": agent_decision.predicted_mae,
+                    "execution_score": agent_decision.execution_score,
+                    "blocker_codes": list(agent_decision.blocker_codes),
+                    "live_influence": agent_decision.live_influence,
+                    "diagnostics": agent_decision.diagnostics,
+                }
+                head_influence = dict(
+                    agent_decision.diagnostics.get("head_influence") or {}
+                )
+                context[market]["ml_probability"] = (
+                    agent_decision.alpha_probability
+                    if head_influence.get("alpha")
+                    else None
+                )
+                context[market]["forecast_score"] = (
+                    agent_decision.forecast_score
+                    if head_influence.get("return")
+                    else None
+                )
+                context[market]["agent_entry_blocked"] = bool(
+                    agent_decision.entry_blocked
+                )
+                context[market]["rl_score"] = None
                 mtf_summary[market] = {
-                    tf: len(causal_frames.get(tf, pd.DataFrame()))
-                    for tf in timeframes
+                    tf: len(causal_frames.get(tf, pd.DataFrame())) for tf in timeframes
                 }
                 frames[market] = frame
             except Exception as exc:
-                skipped.append(
-                    {
-                        "market": market,
-                        "reason": type(exc).__name__,
-                        "detail": str(exc)[:300],
-                    }
-                )
+                skipped.append({"market": market, "reason": type(exc).__name__, "detail": str(exc)[:300]})
 
         equity, cash, exposure = self._account(markets)
-        authority = (
-            Authority.LIVE
-            if self.mode == "live"
-            else Authority.PAPER
-            if self.mode == "paper"
-            else Authority.SHADOW
-        )
+        authority = Authority.LIVE if self.mode == "live" else Authority.PAPER if self.mode == "paper" else Authority.SHADOW
         result = SwingPipeline(self.settings).run(
             frames,
             equity_eur=equity,
@@ -725,58 +842,52 @@ class ProactiveTrader:
         positions = self.state.positions()
         for intent in result.intents:
             frame = frames.get(intent.market)
-            if (
-                frame is None
-                or frame.empty
-                or intent.market in positions
-            ):
+            if frame is None or frame.empty or intent.market in positions:
                 continue
             candle_ts = frame.index[-1].isoformat()
             if self.state.seen(intent.market, candle_ts, "BUY"):
                 continue
             execution = self._execute_buy(intent)
-            self.state.mark(
-                intent.market,
-                candle_ts,
-                "BUY",
-                {
-                    "intent": intent.to_dict(),
-                    "execution": execution,
-                },
-            )
-            executions.append(
-                {"intent": intent.to_dict(), "execution": execution}
-            )
+            self.state.mark(intent.market, candle_ts, "BUY", {"intent": intent.to_dict(), "execution": execution})
+            executions.append({"intent": intent.to_dict(), "execution": execution})
+            self._record_simulated_position(intent, execution, frame)
 
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode,
             "data_source": "Sjagil/crypto python library",
             "markets": markets,
+            "universe": {
+                "selected_size": universe_snapshot.get("selected_size"),
+                "markets": universe_snapshot.get("markets"),
+                "generated_at": universe_snapshot.get("generated_at"),
+                "expires_at": universe_snapshot.get("expires_at"),
+                "liquidity_degraded": universe_snapshot.get("liquidity_degraded"),
+                "preferred_liquidity_count": universe_snapshot.get("preferred_liquidity_count"),
+                "fallback_liquidity_count": universe_snapshot.get("fallback_liquidity_count"),
+                "policy": universe_snapshot.get("policy"),
+                "current_liquidity_snapshot_not_point_in_time": universe_snapshot.get("current_liquidity_snapshot_not_point_in_time"),
+            },
+            "screened_markets": len(causal_primary),
+            "deep_scan_markets": deep_markets,
+            "deep_scan_limit": deep_scan_limit,
+            "screen": screen,
             "equity_eur": str(equity),
             "cash_eur": str(cash),
             "exposure_eur": str(exposure),
             "nlp_documents": len(docs),
             "news": self._last_news_status,
             "crypto_library_ready": library_status.get("ready", False),
-            "crypto_library_imported_modules": library_status.get(
-                "imported_modules", 0
-            ),
-            "crypto_library_required_modules": library_status.get(
-                "required_modules", 0
-            ),
+            "crypto_library_imported_modules": library_status.get("imported_modules", 0),
+            "crypto_library_required_modules": library_status.get("required_modules", 0),
             "prospective_context_status": prospective_status,
             "prospective_context_error": prospective_error,
             "microstructure_readiness": micro_readiness,
+            "agent_runtime": self.agents.status(),
             "mtf_rows": mtf_summary,
             "signals": [
-                {
-                    "market": s.market,
-                    "side": s.side.value,
-                    "score": s.score,
-                    "edge_bps": s.expected_edge_bps,
-                    "votes": [v.source for v in s.votes],
-                }
+                {"market": s.market, "side": s.side.value, "score": s.score,
+                 "edge_bps": s.expected_edge_bps, "votes": [v.source for v in s.votes]}
                 for s in result.signals
             ],
             "market_context": context,
@@ -785,12 +896,7 @@ class ProactiveTrader:
             "exit_events": exit_events,
             "skipped": skipped,
             "positions": {
-                k: {
-                    **asdict(v),
-                    "amount": str(v.amount),
-                    "entry_price": str(v.entry_price),
-                    "highest_price": str(v.highest_price),
-                }
+                k: {**asdict(v), "amount": str(v.amount), "entry_price": str(v.entry_price), "highest_price": str(v.highest_price)}
                 for k, v in self.state.positions().items()
             },
         }
@@ -800,39 +906,22 @@ class ProactiveTrader:
             if frame is not None and not frame.empty
         }
         forward_cfg = self.settings.autonomy.get("forward_evidence", {}) if hasattr(self.settings, "autonomy") else {}
-        should_record = bool(forward_cfg.get("enabled", True)) and bool(
-            forward_cfg.get(f"record_{self.mode}", True)
-        )
+        should_record = bool(forward_cfg.get("enabled", True)) and bool(forward_cfg.get(f"record_{self.mode}", True))
         if should_record:
             payload["forward_evidence"] = self.forward.append_cycle(payload, candle_times)
             if bool(forward_cfg.get("mature_on_cycle", True)):
-                horizons = tuple(
-                    int(value)
-                    for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or [])
-                    if int(value) > 0
-                )
-                payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(
-                    frames,
-                    horizons_hours=horizons or (1, 4, 24),
-                )
+                horizons = tuple(int(value) for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or []) if int(value) > 0)
+                payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(frames, horizons_hours=horizons or (1, 4, 24))
             payload["forward_evidence"]["ledger"] = self.forward.status()
             payload["forward_evidence"]["outcomes"] = self.forward.outcome_status()
         else:
-            payload["forward_evidence"] = {
-                "recorded": False,
-                "ledger": self.forward.status(),
-                "outcomes": self.forward.outcome_status(),
-            }
+            payload["forward_evidence"] = {"recorded": False, "ledger": self.forward.status(), "outcomes": self.forward.outcome_status()}
 
-        out = (
-            self.settings.project_root
-            / "output/crypto_ai_swing/proactive/latest.json"
-        )
+        payload["prospective_canary_readiness"] = self._prospective_canary_readiness()
+
+        out = self.settings.project_root / "output/crypto_ai_swing/proactive/latest.json"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
-            json.dumps(payload, indent=2, default=str),
-            encoding="utf-8",
-        )
+        out.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         return payload
 
     def run_forever(self, interval_seconds: int = 60) -> None:

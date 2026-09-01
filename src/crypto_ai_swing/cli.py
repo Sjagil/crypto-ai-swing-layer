@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from decimal import Decimal
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 import json
 import numpy as np
 import pandas as pd
@@ -19,6 +21,13 @@ from .nlp.engine import NLPMarketEngine
 from .intelligence.crypto_news import CryptoNewsCollector
 from .research.native import NativeResearchBridge
 from .research.forward import ForwardEvidenceLedger
+from .agents.training import AgentTrainer
+from .agents.runtime import AgentRuntime
+from .agents.rl_training import train_ppo_challenger
+from .execution.crypto_authority import CryptoAuthorityAdapter
+from .orchestration.supervisor import AutonomousSupervisor
+from .universe.runtime import UniverseManager
+from .research.bootstrap import ColdStartResearchRunner
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -26,6 +35,40 @@ console = Console()
 
 def _settings() -> Settings:
     return Settings.load(Path.cwd())
+
+
+def _forward_ledger(settings: Settings) -> ForwardEvidenceLedger:
+    cfg = settings.autonomy.get("forward_evidence", {})
+    rel = cfg.get("path", "output/crypto_ai_swing/forward/forward.sqlite")
+    return ForwardEvidenceLedger(
+        settings.project_root / rel,
+        decision_bucket_minutes=int(cfg.get("decision_bucket_minutes", 15)),
+    )
+
+
+def _configured_canary_readiness(
+    settings: Settings,
+    ledger: ForwardEvidenceLedger,
+) -> dict:
+    cfg = dict(
+        settings.autonomy.get("forward_evidence", {})
+        .get("canary_readiness", {})
+        or {}
+    )
+    return ledger.canary_readiness(
+        primary_horizon_hours=int(cfg.get("primary_horizon_hours", 4)),
+        minimum_unblocked_buy_outcomes=int(
+            cfg.get("minimum_unblocked_buy_outcomes", 30)
+        ),
+        minimum_distinct_markets=int(cfg.get("minimum_distinct_markets", 5)),
+        minimum_observation_span_hours=float(
+            cfg.get("minimum_observation_span_hours", 72)
+        ),
+        minimum_mean_return_bps=float(cfg.get("minimum_mean_return_bps", 0.0)),
+        minimum_positive_return_rate=float(
+            cfg.get("minimum_positive_return_rate", 0.50)
+        ),
+    )
 
 
 @app.command()
@@ -206,8 +249,17 @@ def research_run(
             execute_exact=exact,
         )
         summary = bridge.factory_summary(payload)
-        summary["status"] = "COMPLETED"
-        summary["exact_requested"] = bool(exact)
+        if str(payload.get("status") or "").startswith("COLD_START"):
+            bootstrap = ColdStartResearchRunner(s).run()
+            summary = {
+                **summary,
+                "status": payload.get("status"),
+                "exact_requested": bool(exact),
+                "cold_start_bootstrap": bootstrap,
+            }
+        else:
+            summary["status"] = "COMPLETED"
+            summary["exact_requested"] = bool(exact)
     except Exception as exc:
         summary = {
             "status": "BLOCKED",
@@ -230,7 +282,10 @@ def forward_mature(
     s = _settings()
     cfg = s.autonomy.get("forward_evidence", {})
     rel = cfg.get("path", "output/crypto_ai_swing/forward/forward.sqlite")
-    ledger = ForwardEvidenceLedger(s.project_root / rel)
+    ledger = ForwardEvidenceLedger(
+        s.project_root / rel,
+        decision_bucket_minutes=int(cfg.get("decision_bucket_minutes", 15)),
+    )
     bridge = CryptoLibraryBridge(s.crypto_repo_root)
     try:
         parsed = tuple(
@@ -259,15 +314,31 @@ def forward_mature(
 def forward_report() -> None:
     """Report matured prospective outcomes without granting promotion authority."""
     s = _settings()
-    cfg = s.autonomy.get("forward_evidence", {})
-    rel = cfg.get("path", "output/crypto_ai_swing/forward/forward.sqlite")
-    ledger = ForwardEvidenceLedger(s.project_root / rel)
+    ledger = _forward_ledger(s)
     try:
         payload = ledger.report()
+        payload["canary_readiness"] = _configured_canary_readiness(s, ledger)
         out = s.project_root / "output/crypto_ai_swing/forward/report.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         payload["output"] = str(out)
+        console.print_json(json.dumps(payload, default=str))
+    finally:
+        ledger.close()
+
+
+@app.command("edge-calibration-status")
+def edge_calibration_status() -> None:
+    """Show prospective 4h canary evidence and edge calibration readiness."""
+    s = _settings()
+    ledger = _forward_ledger(s)
+    try:
+        payload = {
+            "readiness": _configured_canary_readiness(s, ledger),
+            "calibration": ledger.report().get("calibration", {}),
+            "authority": "EVIDENCE_ONLY",
+            "orders_submitted": 0,
+        }
         console.print_json(json.dumps(payload, default=str))
     finally:
         ledger.close()
@@ -279,7 +350,10 @@ def forward_status() -> None:
     s = _settings()
     cfg = s.autonomy.get("forward_evidence", {})
     rel = cfg.get("path", "output/crypto_ai_swing/forward/forward.sqlite")
-    ledger = ForwardEvidenceLedger(s.project_root / rel)
+    ledger = ForwardEvidenceLedger(
+        s.project_root / rel,
+        decision_bucket_minutes=int(cfg.get("decision_bucket_minutes", 15)),
+    )
     try:
         console.print_json(json.dumps(ledger.status()))
     finally:
@@ -456,6 +530,200 @@ def proactive(
     finally:
         trader.close()
 
+
+
+@app.command("universe-refresh")
+def universe_refresh() -> None:
+    """Refresh the public Bitvavo EUR spot universe and select exactly 25 markets."""
+    s = _settings()
+    payload = UniverseManager(s).current(force_refresh=True)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("universe-status")
+def universe_status() -> None:
+    """Show the current cached 25-market runtime universe."""
+    s = _settings()
+    payload = UniverseManager(s).current()
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("bootstrap-research")
+def bootstrap_research(
+    timeframe: str = typer.Option("1h"),
+    cost_bps_per_side: float | None = typer.Option(
+        None, min=0.0,
+        help="Optional uniform one-way cost. Empty uses current per-market spread floor.",
+    ),
+    final_holdout_shortlist_size: int = typer.Option(5, min=1, max=20),
+) -> None:
+    """Run leakage-hardened cold-start research over the runtime universe."""
+    s = _settings()
+    payload = ColdStartResearchRunner(s).run(
+        timeframe=timeframe,
+        cost_bps_per_side=cost_bps_per_side,
+        final_holdout_shortlist_size=final_holdout_shortlist_size,
+    )
+    console.print_json(json.dumps(payload, default=str))
+
+@app.command("economics-bootstrap")
+def economics_bootstrap() -> None:
+    s=_settings();bridge=NativeResearchBridge(s.crypto_repo_root)
+    try: payload=bridge.bootstrap_economics()
+    except Exception as exc: payload={"status":"BLOCKED","error_type":type(exc).__name__,"error":str(exc)[:1000],"orders_submitted":0}
+    console.print_json(json.dumps(payload,default=str))
+
+@app.command("agent-train")
+def agent_train(
+    markets: str = typer.Option("", help="Comma list. Empty = current dynamic universe"),
+    timeframe: str = typer.Option("1h"),
+    horizon_bars: int = typer.Option(4,min=1,max=168),
+    minimum_rows: int = typer.Option(1200,min=300),
+) -> None:
+    s=_settings();trainer=AgentTrainer(s)
+    result=trainer.train(
+        markets=[x.strip().upper() for x in markets.split(",") if x.strip()] or None,
+        timeframe=timeframe,horizon_bars=horizon_bars,minimum_rows=minimum_rows,
+        minimum_net_move_bps=float(s.agents.get("minimum_net_move_bps",65)),
+    )
+    console.print_json(json.dumps({
+        "status":result.status,"artifact":str(result.artifact_path),"pointer":str(result.pointer_path),
+        "dataset_id":result.dataset_id,"rows":result.row_count,"markets":list(result.markets),
+        "metrics":result.metrics,"live_decision_influence":False,"automatic_live_promotion":False,
+    },default=str))
+
+@app.command("agent-status")
+def agent_status() -> None:
+    s=_settings();console.print_json(json.dumps(AgentRuntime(s).status(),default=str))
+
+@app.command("agent-infer")
+def agent_infer(market: str = typer.Argument("BTC-EUR"), timeframe: str = typer.Option("1h")) -> None:
+    s=_settings();bridge=CryptoLibraryBridge(s.crypto_repo_root)
+    decision=AgentRuntime(s,mode="shadow").predict_frame(
+        market.upper(),bridge.ohlcv(market.upper(),timeframe,persist=False),{"spread_bps":1.0}
+    )
+    console.print_json(json.dumps(asdict(decision),default=str))
+
+@app.command("rl-train")
+def rl_train(
+    market: str = typer.Argument("BTC-EUR"),
+    timeframe: str = typer.Option("1h"),
+    timesteps: int = typer.Option(50000,min=1000),
+) -> None:
+    s=_settings();bridge=CryptoLibraryBridge(s.crypto_repo_root)
+    payload=train_ppo_challenger(s,frame=bridge.ohlcv(market.upper(),timeframe,persist=False),total_timesteps=timesteps)
+    console.print_json(json.dumps(payload,default=str))
+
+@app.command("live-canary-status")
+def live_canary_status() -> None:
+    s=_settings();console.print_json(json.dumps(CryptoAuthorityAdapter(s.crypto_repo_root).authority_status(),default=str))
+
+@app.command("live-canary-approve")
+def live_canary_approve(
+    markets: str = typer.Option("", help="Comma list. Empty = current dynamic universe"),
+    approval: str = typer.Option(...),
+) -> None:
+    s = _settings()
+    ledger = _forward_ledger(s)
+    try:
+        readiness = _configured_canary_readiness(s, ledger)
+    finally:
+        ledger.close()
+    if not bool(readiness.get("eligible")):
+        console.print_json(json.dumps({
+            "status": "BLOCKED_PROSPECTIVE_EVIDENCE",
+            "canary_approved": False,
+            "readiness": readiness,
+            "orders_submitted": 0,
+            "automatic_live_promotion": False,
+        }, default=str))
+        return
+    selected = [x.strip().upper() for x in markets.split(",") if x.strip()]
+    if not selected:
+        selected = list(UniverseManager(s).current()["markets"])
+    payload = CryptoAuthorityAdapter(s.crypto_repo_root).approve(
+        markets=selected,
+        approval=approval,
+    )
+    payload["prospective_readiness"] = readiness
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("live-canary-deactivate")
+def live_canary_deactivate() -> None:
+    s=_settings();console.print_json(json.dumps(CryptoAuthorityAdapter(s.crypto_repo_root).deactivate(),default=str))
+
+@app.command("live-canary-preflight")
+def live_canary_preflight() -> None:
+    s = _settings()
+    ledger = _forward_ledger(s)
+    try:
+        readiness = _configured_canary_readiness(s, ledger)
+    finally:
+        ledger.close()
+    if not bool(readiness.get("eligible")):
+        console.print_json(json.dumps({
+            "ready": False,
+            "status": "BLOCKED_PROSPECTIVE_EVIDENCE",
+            "blockers": list(readiness.get("blockers") or []),
+            "prospective_readiness": readiness,
+            "orders_submitted": 0,
+        }, default=str))
+        return
+
+    latest = s.project_root / "output/crypto_ai_swing/proactive/latest.json"
+    if not latest.is_file():
+        raise typer.BadParameter("Run proactive --mode shadow --once first")
+    report = json.loads(latest.read_text())
+    candidates = [
+        dict(x.get("intent") or {})
+        for x in report.get("executions") or []
+        if str((x.get("intent") or {}).get("side") or "").upper() == "BUY"
+    ]
+    if not candidates:
+        console.print_json(json.dumps({
+            "ready": False,
+            "blockers": ["NO_CURRENT_NATURAL_BUY_INTENT"],
+            "prospective_readiness": readiness,
+            "orders_submitted": 0,
+        }))
+        return
+    raw = candidates[0]
+    now = datetime.now(timezone.utc)
+    from crypto_ai_swing.contracts import Authority as A, Side as S, TradeIntent as T
+    intent = T(
+        intent_id=str(raw["intent_id"]),
+        created_at=now,
+        market=str(raw["market"]),
+        side=S.BUY,
+        notional_eur=min(Decimal("10"), Decimal(str(raw["notional_eur"]))),
+        expected_edge_bps=float(raw["expected_edge_bps"]),
+        estimated_round_trip_cost_bps=float(raw["estimated_round_trip_cost_bps"]),
+        net_edge_bps=float(raw["net_edge_bps"]),
+        stop_pct=float(raw["stop_pct"]),
+        take_profit_pct=float(raw["take_profit_pct"]),
+        trailing_stop_pct=float(raw["trailing_stop_pct"]),
+        strategy=str(raw["strategy"]),
+        authority=A.LIVE,
+        expires_at=now + timedelta(seconds=120),
+        metadata=dict(raw.get("metadata") or {}),
+    )
+    payload = CryptoAuthorityAdapter(s.crypto_repo_root).preflight(intent)
+    payload["prospective_readiness"] = readiness
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("supervisor")
+def supervisor(
+    mode: str = typer.Option("shadow",help="shadow, paper, or live"),
+    once: bool = typer.Option(False),
+) -> None:
+    if mode not in {"shadow","paper","live"}: raise typer.BadParameter("invalid mode")
+    s=_settings();runner=AutonomousSupervisor(s,mode=mode)
+    try:
+        if once: console.print_json(json.dumps(runner.run_once(),default=str))
+        else: runner.run_forever()
+    finally: runner.close()
 
 if __name__ == "__main__":
     app()

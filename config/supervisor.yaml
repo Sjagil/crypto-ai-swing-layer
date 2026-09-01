@@ -1,0 +1,12 @@
+schema: crypto_ai_swing_supervisor_v1
+cycle_interval_seconds: 60
+agent_retrain_seconds: 21600
+economics_refresh_seconds: 21600
+research_run_seconds: 86400
+research_enabled: true
+research_exact: false
+research_maximum_rows: 20000
+state_path: output/crypto_ai_swing/supervisor/state.json
+heartbeat_path: output/crypto_ai_swing/supervisor/heartbeat.json
+automatic_live_authority: false
+automatic_model_live_promotion: false

@@ -62,6 +62,9 @@ class SwingPipeline:
                 market,
                 ts,
                 row,
+                ml_probability=context.get("ml_probability"),
+                forecast_score=context.get("forecast_score"),
+                rl_score=context.get("rl_score"),
                 nlp_score=context.get("nlp_score"),
                 nlp_confidence=context.get("nlp_confidence"),
                 nlp_severe_negative=bool(
@@ -71,6 +74,7 @@ class SwingPipeline:
                 orderflow_score=context.get("orderflow_score"),
                 context_entry_blocked=bool(
                     context.get("entry_blocked", False)
+                    or context.get("agent_entry_blocked", False)
                 ),
                 minimum_entry_score=minimum,
             )

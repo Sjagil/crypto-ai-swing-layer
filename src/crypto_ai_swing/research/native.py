@@ -110,6 +110,14 @@ class NativeResearchBridge:
         return result
 
 
+    def bootstrap_economics(self) -> dict[str, Any]:
+        module = self.crypto.import_module("reporting.canonical_economics")
+        fn = getattr(module, "build_canonical_strategy_economics", None)
+        if not callable(fn): raise RuntimeError("build_canonical_strategy_economics unavailable")
+        value = fn(self.crypto.settings())
+        if not isinstance(value, dict): raise RuntimeError("canonical economics builder returned non-dict")
+        return value
+
     def run_factory_campaign(
         self,
         *,
@@ -126,11 +134,42 @@ class NativeResearchBridge:
         if not callable(fn):
             raise RuntimeError("build_research_factory_artifact unavailable")
         settings = self.crypto.settings()
-        value = fn(
-            settings,
-            maximum_rows=int(maximum_rows),
-            execute_exact=bool(execute_exact),
+        paths = getattr(settings, "paths", None)
+        output_dir = getattr(paths, "output_dir", None)
+        economics_path = (
+            Path(output_dir) / "economics" / "latest.json"
+            if output_dir is not None
+            else None
         )
+        if economics_path is not None and economics_path.is_file():
+            try:
+                economics = json.loads(economics_path.read_text(encoding="utf-8"))
+            except Exception:
+                economics = {}
+            if int(economics.get("family_result_count") or 0) == 0:
+                return {
+                    "schema_version": "crypto_ai_swing_native_research_bridge_v2",
+                    "status": "COLD_START_NO_P0_5_FAMILIES",
+                    "reason": "canonical economics contains zero strategy-family episodes",
+                    "automatic_live_promotion": False,
+                    "orders_submitted": 0,
+                }
+        try:
+            value = fn(
+                settings,
+                maximum_rows=int(maximum_rows),
+                execute_exact=bool(execute_exact),
+            )
+        except ValueError as exc:
+            if "P0.5 branch changed" in str(exc):
+                return {
+                    "schema_version": "crypto_ai_swing_native_research_bridge_v2",
+                    "status": "COLD_START_P0_5_BRANCH_NOT_APPLICABLE",
+                    "reason": str(exc),
+                    "automatic_live_promotion": False,
+                    "orders_submitted": 0,
+                }
+            raise
         if not isinstance(value, dict):
             raise RuntimeError("build_research_factory_artifact returned non-dict")
         return value
@@ -141,6 +180,14 @@ class NativeResearchBridge:
         exact = dict(payload.get("exact_validation") or {})
         promotion = list(payload.get("promotion_table") or [])
         first_promotion = dict(promotion[0]) if promotion else {}
+        if str(payload.get("status") or "").startswith("COLD_START"):
+            return {
+                "schema_version": payload.get("schema_version"),
+                "status": payload.get("status"),
+                "reason": payload.get("reason"),
+                "automatic_live_promotion": False,
+                "orders_submitted": 0,
+            }
         return {
             "schema_version": payload.get("schema_version"),
             "run_id": payload.get("run_id"),
