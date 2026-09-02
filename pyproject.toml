@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-ai-swing-layer"
-version = "0.11.0"
+version = "0.12.0"
 description = "Crypto-only AI swing research, portfolio, shadow and execution-intent layer"
 requires-python = ">=3.11"
 dependencies = [

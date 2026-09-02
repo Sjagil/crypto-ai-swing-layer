@@ -30,7 +30,17 @@ from sklearn.preprocessing import StandardScaler
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.universe.runtime import UniverseManager
-from crypto_ai_swing.quant.evidence import probability_diagnostics, native_model_selection_evidence, native_hac_evidence
+from crypto_ai_swing.agents.calibration import (
+    CalibratedClassifier,
+    fit_probability_calibrator,
+    purged_calibration_selection_split,
+)
+from crypto_ai_swing.agents.trials import register_trial_family
+from crypto_ai_swing.quant.evidence import (
+    native_model_selection_evidence,
+    native_selected_return_evidence,
+    probability_diagnostics,
+)
 
 
 @dataclass(frozen=True)
@@ -173,6 +183,7 @@ def _threshold_plan(
     cost_floor: float,
     minimum_selected: int = 40,
     minimum_markets: int = 5,
+    minimum_positive_market_fraction: float = 0.50,
 ) -> dict[str, Any]:
     plans: list[dict[str, Any]] = []
     for threshold in np.arange(0.50, 0.751, 0.025):
@@ -188,8 +199,13 @@ def _threshold_plan(
             and econ["market_count"] >= minimum_markets
             and econ["mean_net"] is not None
             and float(econ["mean_net"]) > 0.0
+            and econ["conservative_mean_net"] is not None
+            and float(econ["conservative_mean_net"]) > 0.0
             and econ["market_balanced_mean_net"] is not None
             and float(econ["market_balanced_mean_net"]) > 0.0
+            and econ["positive_market_fraction"] is not None
+            and float(econ["positive_market_fraction"])
+            >= float(minimum_positive_market_fraction)
         )
         plans.append({"threshold": threshold, **econ, "economically_eligible": eligible})
 
@@ -224,6 +240,9 @@ def _threshold_plan(
         "grid": plans,
         "minimum_selected": minimum_selected,
         "minimum_markets": minimum_markets,
+        "minimum_positive_market_fraction": float(
+            minimum_positive_market_fraction
+        ),
     }
 
 
@@ -335,45 +354,109 @@ class AgentTrainer:
         val_realized = validation["target_forward_return"].to_numpy(float)
         val_markets = validation["market"].astype(str).to_numpy()
         cost_floor = float(minimum_net_move_bps) / 10_000.0
+
+        calibration_cfg = dict(
+            (getattr(self.settings, "agents", {}) or {}).get(
+                "calibration", {}
+            )
+            or {}
+        )
+        calibration_frame, selection_frame = (
+            purged_calibration_selection_split(
+                validation,
+                horizon_bars=horizon_bars,
+                calibration_fraction=float(
+                    calibration_cfg.get("calibration_fraction", 0.50)
+                ),
+            )
+        )
+        x_calibration = calibration_frame.loc[:, features]
+        y_calibration = calibration_frame["target_alpha"].astype(int)
+        x_selection = selection_frame.loc[:, features]
+        y_selection = selection_frame["target_alpha"].astype(int)
+        selection_realized = selection_frame[
+            "target_forward_return"
+        ].to_numpy(float)
+        selection_markets = selection_frame["market"].astype(str).to_numpy()
+
         candidates = {
             "hist_gradient_boosting": _hist_classifier(),
             "logistic_balanced": _logistic_classifier(),
             "extra_trees": _extra_trees_classifier(),
         }
-        tournament: list[dict[str, Any]] = []
-        fitted: dict[str, Pipeline] = {}
-        validation_probabilities: dict[str, np.ndarray] = {}
-        threshold_rows: dict[str, list[dict[str, Any]]] = {}
-        for name, model in candidates.items():
-            model.fit(x_train, y_train)
-            probability = model.predict_proba(x_val)[:, 1]
-            threshold_plan = _threshold_plan(
-                probability,
-                val_realized,
-                val_markets,
-                cost_floor=cost_floor,
-                minimum_selected=min_val_selected,
-                minimum_markets=min_val_markets,
+        calibration_methods = tuple(
+            str(value).strip().lower()
+            for value in calibration_cfg.get(
+                "methods", ["raw", "sigmoid", "isotonic"]
             )
-            chosen = dict(threshold_plan["chosen"])
-            validation_probabilities[name] = probability
-            threshold_rows[name] = list(threshold_plan["grid"])
-            auc = _auc(y_val, probability)
-            brier = float(brier_score_loss(y_val, probability))
-            tournament.append({
-                "model": name,
-                "validation_auc": auc,
-                "validation_brier": brier,
-                "threshold_plan": threshold_plan,
-                "validation_selected_count": chosen["count"],
-                "validation_selected_market_count": chosen["market_count"],
-                "validation_selected_mean_net": chosen["mean_net"],
-                "validation_market_balanced_mean_net": chosen["market_balanced_mean_net"],
-                "validation_positive_market_fraction": chosen["positive_market_fraction"],
-                "validation_conservative_mean_net": chosen["conservative_mean_net"],
-                "validation_economically_eligible": chosen["economically_eligible"],
-            })
-            fitted[name] = model
+            if str(value).strip()
+        )
+        if not calibration_methods:
+            raise ValueError("at least one calibration method is required")
+
+        tournament: list[dict[str, Any]] = []
+        fitted: dict[str, CalibratedClassifier] = {}
+        selection_probabilities: dict[str, np.ndarray] = {}
+        calibration_fit_probabilities: dict[str, np.ndarray] = {}
+        threshold_rows: dict[str, list[dict[str, Any]]] = {}
+
+        for model_name, model in candidates.items():
+            model.fit(x_train, y_train)
+            raw_calibration = model.predict_proba(x_calibration)[:, 1]
+            for calibration_method in calibration_methods:
+                calibrator = fit_probability_calibrator(
+                    raw_calibration,
+                    y_calibration.to_numpy(int),
+                    method=calibration_method,
+                )
+                calibrated = CalibratedClassifier(model, calibrator)
+                candidate_key = f"{model_name}__cal_{calibration_method}"
+                calibration_probability = calibrated.predict_proba(
+                    x_calibration
+                )[:, 1]
+                probability = calibrated.predict_proba(x_selection)[:, 1]
+                threshold_plan = _threshold_plan(
+                    probability,
+                    selection_realized,
+                    selection_markets,
+                    cost_floor=cost_floor,
+                    minimum_selected=min_val_selected,
+                    minimum_markets=min_val_markets,
+                )
+                chosen = dict(threshold_plan["chosen"])
+                auc = _auc(y_selection, probability)
+                brier = float(brier_score_loss(y_selection, probability))
+                selection_probabilities[candidate_key] = probability
+                calibration_fit_probabilities[candidate_key] = (
+                    calibration_probability
+                )
+                threshold_rows[candidate_key] = list(threshold_plan["grid"])
+                tournament.append(
+                    {
+                        "candidate_key": candidate_key,
+                        "model": model_name,
+                        "calibration_method": calibration_method,
+                        "validation_auc": auc,
+                        "validation_brier": brier,
+                        "threshold_plan": threshold_plan,
+                        "validation_selected_count": chosen["count"],
+                        "validation_selected_market_count": chosen["market_count"],
+                        "validation_selected_mean_net": chosen["mean_net"],
+                        "validation_market_balanced_mean_net": chosen[
+                            "market_balanced_mean_net"
+                        ],
+                        "validation_positive_market_fraction": chosen[
+                            "positive_market_fraction"
+                        ],
+                        "validation_conservative_mean_net": chosen[
+                            "conservative_mean_net"
+                        ],
+                        "validation_economically_eligible": chosen[
+                            "economically_eligible"
+                        ],
+                    }
+                )
+                fitted[candidate_key] = calibrated
 
         def rank(row: dict[str, Any]):
             return (
@@ -385,14 +468,48 @@ class AgentTrainer:
                 -float(row.get("validation_brier") or 999.0),
             )
 
-        multiple_testing = native_model_selection_evidence(
-            validation, validation_probabilities, threshold_rows,
-            cost_floor=cost_floor, horizon_bars=horizon_bars,
-            crypto_repo_root=self.settings.crypto_repo_root,
+        current_trial_count = sum(len(value) for value in threshold_rows.values())
+        trial_ledger = register_trial_family(
+            self.settings.project_root / "output/crypto_ai_swing/agents",
+            experiment={
+                "schema_version": "agent_alpha_tournament_v4",
+                "dataset_id": dataset.dataset_id,
+                "feature_columns": list(features),
+                "timeframe": timeframe,
+                "horizon_bars": int(horizon_bars),
+                "minimum_net_move_bps": float(minimum_net_move_bps),
+                "models": sorted(candidates),
+                "calibration_methods": list(calibration_methods),
+                "thresholds": [
+                    round(float(value), 3)
+                    for value in np.arange(0.50, 0.751, 0.025)
+                ],
+            },
+            trial_count=current_trial_count,
+            historical_floor=int(quality_cfg.get("historical_trial_floor", 33)),
         )
+
+        native_research = self.crypto.settings().research
+        multiple_testing = native_model_selection_evidence(
+            selection_frame,
+            selection_probabilities,
+            threshold_rows,
+            cost_floor=cost_floor,
+            horizon_bars=horizon_bars,
+            crypto_repo_root=self.settings.crypto_repo_root,
+            known_trial_count=int(trial_ledger["global_known_trial_count"]),
+            bootstrap_samples=max(
+                int(quality_cfg.get("multiple_testing_bootstrap_samples", 2000)),
+                int(native_research.multiple_testing_bootstrap_samples),
+            ),
+            block_size=int(native_research.multiple_testing_block_size),
+        )
+
         winner_row = max(tournament, key=rank)
+        winner_key = str(winner_row["candidate_key"])
         winner_name = str(winner_row["model"])
-        alpha = fitted[winner_name]
+        winner_calibration_method = str(winner_row["calibration_method"])
+        alpha = fitted[winner_key]
         threshold = float(winner_row["threshold_plan"]["chosen"]["threshold"])
 
         regime = _hist_classifier().fit(
@@ -414,11 +531,68 @@ class AgentTrainer:
         )
         test_auc = _auc(test["target_alpha"].astype(int), alpha_p)
         val_auc = winner_row.get("validation_auc")
-        validation_probability_quality = probability_diagnostics(y_val.to_numpy(int), validation_probabilities[winner_name])
-        test_probability_quality = probability_diagnostics(test["target_alpha"].astype(int).to_numpy(), alpha_p)
-        selected_hac_evidence = native_hac_evidence(
-            test, test_selected, cost_floor=cost_floor, horizon_bars=horizon_bars,
+        calibration_fit_probability_quality = probability_diagnostics(
+            y_calibration.to_numpy(int),
+            calibration_fit_probabilities[winner_key],
+        )
+        validation_probability_quality = probability_diagnostics(
+            y_selection.to_numpy(int),
+            selection_probabilities[winner_key],
+        )
+        test_probability_quality = probability_diagnostics(
+            test["target_alpha"].astype(int).to_numpy(),
+            alpha_p,
+        )
+        selected_statistical_evidence = native_selected_return_evidence(
+            test,
+            test_selected,
+            cost_floor=cost_floor,
+            horizon_bars=horizon_bars,
             crypto_repo_root=self.settings.crypto_repo_root,
+            simulations=int(quality_cfg.get("stochastic_simulations", 10000)),
+        )
+
+        winner_trial = f"{winner_key}@{threshold:.3f}"
+        dsr = dict(
+            multiple_testing.get("deflated_sharpe_probabilities", {}) or {}
+        )
+        pbo = multiple_testing.get("probability_of_backtest_overfitting")
+        model_selection_pass = bool(
+            multiple_testing.get("status") == "READY"
+            and float(multiple_testing.get("white_reality_check_pvalue", 1.0))
+            <= float(native_research.maximum_white_reality_check_pvalue)
+            and float(multiple_testing.get("hansen_spa_pvalue", 1.0))
+            <= float(native_research.maximum_hansen_spa_pvalue)
+            and pbo is not None
+            and float(pbo)
+            <= float(native_research.maximum_probability_of_backtest_overfitting)
+            and float(dsr.get(winner_trial, 0.0))
+            >= float(native_research.minimum_deflated_sharpe_probability)
+        )
+        probability_quality_pass = bool(
+            validation_probability_quality["brier_skill"]
+            >= float(quality_cfg.get("minimum_validation_brier_skill", 0.0))
+            and test_probability_quality["brier_skill"]
+            >= float(quality_cfg.get("minimum_test_brier_skill", 0.0))
+            and validation_probability_quality["expected_calibration_error"]
+            <= float(
+                quality_cfg.get(
+                    "maximum_validation_expected_calibration_error", 0.10
+                )
+            )
+            and test_probability_quality["expected_calibration_error"]
+            <= float(
+                quality_cfg.get("maximum_test_expected_calibration_error", 0.10)
+            )
+        )
+        stochastic_validation_pass = bool(
+            selected_statistical_evidence.get("passed") is True
+        )
+        point_in_time_universe_required = bool(
+            quality_cfg.get("require_point_in_time_universe_for_alpha", True)
+        )
+        point_in_time_universe_qualified = bool(
+            not point_in_time_universe_required
         )
         positive_oos_net = bool(
             test_economics["count"] >= min_test_selected
@@ -440,7 +614,13 @@ class AgentTrainer:
             and val_auc is not None
             and float(val_auc) >= float(quality_cfg.get("minimum_validation_alpha_auc", 0.52))
             and test_auc is not None
-            and float(test_auc) >= float(quality_cfg.get("minimum_test_alpha_auc", 0.50))
+            and float(test_auc) >= float(
+                quality_cfg.get("minimum_test_alpha_auc", 0.50)
+            )
+            and probability_quality_pass
+            and model_selection_pass
+            and stochastic_validation_pass
+            and point_in_time_universe_qualified
         )
 
         regime_val_p = regime.predict_proba(x_val)[:, 1]
@@ -519,11 +699,39 @@ class AgentTrainer:
             "alpha_accuracy_at_0_5": float(
                 accuracy_score(test["target_alpha"].astype(int), alpha_p >= 0.5)
             ),
+            "alpha_calibration_method": winner_calibration_method,
+            "calibration_fit_probability_quality": calibration_fit_probability_quality,
             "validation_probability_quality": validation_probability_quality,
             "test_probability_quality": test_probability_quality,
+            "probability_quality_pass": probability_quality_pass,
             "model_threshold_multiple_testing": multiple_testing,
-            "selected_hac_evidence": selected_hac_evidence,
-            "implicit_model_threshold_trials": sum(len(v) for v in threshold_rows.values()),
+            "model_selection_winner_trial": winner_trial,
+            "model_selection_pass": model_selection_pass,
+            "selected_statistical_evidence": selected_statistical_evidence,
+            "selected_hac_evidence": {
+                "status": selected_statistical_evidence.get("status"),
+                "path_observations": selected_statistical_evidence.get(
+                    "path_observations"
+                ),
+                "mean_net": selected_statistical_evidence.get("mean_net"),
+                "hac": selected_statistical_evidence.get("hac"),
+            },
+            "stochastic_validation_pass": stochastic_validation_pass,
+            "implicit_model_threshold_trials": current_trial_count,
+            "global_known_trial_count": trial_ledger["global_known_trial_count"],
+            "global_trial_ledger": trial_ledger,
+            "calibration_rows": int(len(calibration_frame)),
+            "selection_rows": int(len(selection_frame)),
+            "calibration_range": [
+                pd.Timestamp(calibration_frame["feature_time"].min()).isoformat(),
+                pd.Timestamp(calibration_frame["feature_time"].max()).isoformat(),
+            ],
+            "selection_range": [
+                pd.Timestamp(selection_frame["feature_time"].min()).isoformat(),
+                pd.Timestamp(selection_frame["feature_time"].max()).isoformat(),
+            ],
+            "point_in_time_universe_required": point_in_time_universe_required,
+            "point_in_time_universe_qualified": point_in_time_universe_qualified,
             "selected_count": int(test_economics["count"]),
             "selected_market_count": int(test_economics["market_count"]),
             "selected_mean_forward_return": test_economics["mean_return"],
@@ -554,7 +762,7 @@ class AgentTrainer:
 
         trained_at = datetime.now(timezone.utc)
         payload = {
-            "schema_version": "swing_agent_bundle_v3",
+            "schema_version": "swing_agent_bundle_v4",
             "status": "SHADOW",
             "shadow_decision_qualified": directional_qualified,
             "head_qualifications": head_qualifications,
@@ -567,6 +775,8 @@ class AgentTrainer:
             "horizon_bars": int(horizon_bars),
             "minimum_net_move_bps": float(minimum_net_move_bps),
             "alpha_probability_threshold": threshold,
+            "alpha_calibration_method": winner_calibration_method,
+            "global_known_trial_count": trial_ledger["global_known_trial_count"],
             "trained_at": trained_at.isoformat(),
             "expires_at": (trained_at + timedelta(days=30)).isoformat(),
             "train_range": [
@@ -608,7 +818,7 @@ class AgentTrainer:
         pointer = root / "latest.pointer.json"
         pointer.parent.mkdir(parents=True, exist_ok=True)
         pointer.write_text(json.dumps({
-            "schema_version": "swing_agent_pointer_v3",
+            "schema_version": "swing_agent_pointer_v4",
             "artifact_path": str(artifact.resolve()),
             "manifest_path": str(manifest_path.resolve()),
             "artifact_hash": artifact_hash,

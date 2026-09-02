@@ -749,7 +749,15 @@ class ProactiveTrader:
                     continue
                 tf_decision = evaluate_timeframe_pipeline(
                     causal_frames, bundle.microstructure, observed_at=observed_at,
-                    maximum_spread_bps=float(self.settings.execution.get("liquidity", {}).get("maximum_spread_bps", 35.0)),
+                    maximum_spread_bps=float(
+                        self.settings.execution.get(
+                            "liquidity", {}
+                        ).get("maximum_spread_bps", 35.0)
+                    ),
+                    policy=dict(
+                        self.settings.proactive.get("timeframe_pipeline", {})
+                        or {}
+                    ),
                 )
                 mtf = tf_decision.mtf_score
                 orderflow = self._orderflow_score(bundle.microstructure)

@@ -72,6 +72,8 @@ class AgentRuntime:
                 "shadow_decision_qualified",
                 "head_qualifications",
                 "alpha_probability_threshold",
+                "alpha_calibration_method",
+                "global_known_trial_count",
                 "live_decision_influence",
             )
         } | {"automatic_live_promotion": False}

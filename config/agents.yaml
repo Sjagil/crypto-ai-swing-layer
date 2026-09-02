@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_agents_v3
+schema: crypto_ai_swing_agents_v4
 enabled: true
 training_markets: []
 training_market_source: runtime_universe_25
@@ -23,6 +23,17 @@ qualification:
   minimum_test_regime_auc: 0.50
   minimum_validation_return_skill: 0.02
   minimum_test_return_skill: 0.00
+  minimum_validation_brier_skill: 0.00
+  minimum_test_brier_skill: 0.00
+  maximum_validation_expected_calibration_error: 0.10
+  maximum_test_expected_calibration_error: 0.10
+  multiple_testing_bootstrap_samples: 2000
+  stochastic_simulations: 10000
+  historical_trial_floor: 33
+  require_point_in_time_universe_for_alpha: true
+calibration:
+  methods: [raw, sigmoid, isotonic]
+  calibration_fraction: 0.50
 rl:
   enabled: false
   algorithm: PPO

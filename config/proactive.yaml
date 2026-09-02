@@ -43,3 +43,9 @@ timeframe_pipeline:
   trigger: 15m
   execution: orderflow
   lower_timeframes_can_override_macro: false
+  weekly_strong_bearish_score: -0.50
+  daily_bullish_confirmation_score: 0.45
+  daily_strong_bearish_score: -0.50
+  weekly_bullish_confirmation_score: 0.45
+  minimum_macro_score_for_long: 0.00
+  minimum_trend_score_for_long: 0.00
