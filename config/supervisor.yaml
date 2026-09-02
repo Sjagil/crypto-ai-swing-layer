@@ -1,5 +1,6 @@
 schema: crypto_ai_swing_supervisor_v1
 cycle_interval_seconds: 60
+task_heartbeat_seconds: 30
 agent_retrain_seconds: 21600
 economics_refresh_seconds: 21600
 research_run_seconds: 86400

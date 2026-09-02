@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+import threading
 import time
+import uuid
 from typing import Any
 
 from crypto_ai_swing.agents.training import AgentTrainer
+from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.orchestration.proactive import ProactiveTrader
 from crypto_ai_swing.research.bootstrap import ColdStartResearchRunner
 from crypto_ai_swing.research.native import NativeResearchBridge
@@ -39,7 +43,17 @@ class AutonomousSupervisor:
         self.trainer = AgentTrainer(settings)
         self.research = NativeResearchBridge(settings.crypto_repo_root)
         self.bootstrap_research = ColdStartResearchRunner(settings)
+        self.operations = NativeOperationsBridge(
+            settings.crypto_repo_root, project_root=settings.project_root
+        )
         self.state = self._load()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = None
+        self._heartbeat_lock = threading.Lock()
+        self._cycle_id = None
+        self._cycle_started_at = None
+        self._current_task = 'IDLE'
+        self._last_completed_task = None
 
     def _load(self):
         try:
@@ -62,11 +76,62 @@ class AutonomousSupervisor:
             return True
         return (_now() - previous.astimezone(timezone.utc)).total_seconds() >= every
 
+    def _atomic_write(self, path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.operations.atomic_write_json(path, payload)
+        except Exception:
+            path.write_text(
+                json.dumps(payload, indent=2, default=str), encoding="utf-8"
+            )
+
     def _save(self, payload):
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(self.state, indent=2, default=str))
-        self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-        self.heartbeat_path.write_text(json.dumps(payload, indent=2, default=str))
+        self._atomic_write(self.state_path, self.state)
+        self._atomic_write(self.heartbeat_path, payload)
+
+    def _progress_payload(self):
+        now = _now().isoformat()
+        return {
+            "schema_version": "crypto_ai_swing_supervisor_heartbeat_v4",
+            "mode": self.mode,
+            "pid": os.getpid(),
+            "cycle_id": self._cycle_id,
+            "cycle_started_at": self._cycle_started_at,
+            "state": "BUSY",
+            "current_task": self._current_task,
+            "task_status": "RUNNING",
+            "last_completed_task": self._last_completed_task,
+            "last_progress_at": now,
+            "heartbeat_at": now,
+            "live_authority_armed_by_supervisor": False,
+            "automatic_model_live_promotion": False,
+        }
+
+    def _heartbeat_pump(self):
+        interval = max(5.0, float(self.cfg.get("task_heartbeat_seconds", 30)))
+        while not self._heartbeat_stop.wait(interval):
+            with self._heartbeat_lock:
+                self._atomic_write(self.heartbeat_path, self._progress_payload())
+
+    def _start_progress(self):
+        self._heartbeat_stop.clear()
+        with self._heartbeat_lock:
+            self._atomic_write(self.heartbeat_path, self._progress_payload())
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_pump,
+            name="crypto-swing-progress-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_progress(self):
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=1.0)
+        self._heartbeat_thread = None
+
+    def _task(self, name: str):
+        self._current_task = name
 
     def _prospective_canary_readiness(self) -> dict[str, Any]:
         forward_cfg = dict(
@@ -110,10 +175,16 @@ class AutonomousSupervisor:
 
     def run_once(self) -> dict[str, Any]:
         started = _now()
+        self._cycle_id = uuid.uuid4().hex
+        self._cycle_started_at = started.isoformat()
+        self._current_task = "STARTING"
+        self._start_progress()
         tasks: dict[str, Any] = {}
         errors: list[dict[str, str]] = []
         try:
+            self._task("universe")
             universe = self.universe.current()
+            self._last_completed_task = "universe"
             tasks["universe"] = {
                 "selected_size": universe.get("selected_size"),
                 "markets": universe.get("markets"),
@@ -125,14 +196,18 @@ class AutonomousSupervisor:
             universe = {"markets": []}
 
         try:
+            self._task("proactive")
             tasks["proactive"] = self.trader.cycle()
+            self._last_completed_task = "proactive"
         except Exception as exc:
             errors.append({"task": "proactive", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
 
         try:
+            self._task("prospective_canary_readiness")
             tasks["prospective_canary_readiness"] = (
                 self._prospective_canary_readiness()
             )
+            self._last_completed_task = "prospective_canary_readiness"
         except Exception as exc:
             errors.append({
                 "task": "prospective_canary_readiness",
@@ -144,6 +219,7 @@ class AutonomousSupervisor:
             "last_agent_train_at", int(self.cfg.get("agent_retrain_seconds", 21600))
         ):
             try:
+                self._task("agent_training")
                 configured = [str(x).upper() for x in acfg.get("training_markets", []) if str(x).strip()]
                 training_markets = configured or list(universe.get("markets") or [])
                 result = self.trainer.train(
@@ -161,13 +237,16 @@ class AutonomousSupervisor:
                     "metrics": result.metrics,
                 }
                 self.state["last_agent_train_at"] = _now().isoformat()
+                self._last_completed_task = "agent_training"
             except Exception as exc:
                 errors.append({"task": "agent_training", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
 
         if self._due("last_economics_at", int(self.cfg.get("economics_refresh_seconds", 21600))):
             try:
+                self._task("economics")
                 tasks["economics"] = self.research.bootstrap_economics()
                 self.state["last_economics_at"] = _now().isoformat()
+                self._last_completed_task = "economics"
             except Exception as exc:
                 errors.append({"task": "economics", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
 
@@ -175,6 +254,7 @@ class AutonomousSupervisor:
             "last_research_at", int(self.cfg.get("research_run_seconds", 86400))
         ):
             try:
+                self._task("research")
                 raw = self.research.run_factory_campaign(
                     maximum_rows=int(self.cfg.get("research_maximum_rows", 20000)),
                     execute_exact=bool(self.cfg.get("research_exact", False)),
@@ -186,16 +266,63 @@ class AutonomousSupervisor:
                         timeframe="1h",
                     )
                 self.state["last_research_at"] = _now().isoformat()
+                self._last_completed_task = "research"
             except Exception as exc:
                 errors.append({"task": "research", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
 
+        warning_codes = tuple(
+            f"SWING_{str(row['task']).upper()}_ERROR" for row in errors
+        )
+        try:
+            tasks["native_operational_degradation"] = self.operations.degradation(
+                warning=warning_codes
+            )
+        except Exception as exc:
+            errors.append({
+                "task": "native_operational_degradation",
+                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            })
+
+        previous_errors = bool(self.state.get("previous_cycle_had_errors", False))
+        current_errors = bool(errors)
+        markets = list(universe.get("markets") or [])
+        if current_errors:
+            self.operations.notify_system_event(
+                "OPERATIONAL_DEGRADATION",
+                {
+                    "status": "DEGRADED",
+                    "reason": ";".join(str(row["error"]) for row in errors[:3]),
+                    "mode": self.mode,
+                },
+                allowed_markets=markets,
+            )
+        elif previous_errors:
+            self.operations.notify_system_event(
+                "OPERATIONAL_RECOVERY",
+                {
+                    "status": "HEALTHY",
+                    "reason": "swing supervisor recovered",
+                    "mode": self.mode,
+                },
+                allowed_markets=markets,
+            )
+
+        self.state["previous_cycle_had_errors"] = current_errors
         self.state["last_cycle_at"] = _now().isoformat()
+        self._stop_progress()
         payload = {
-            "schema_version": "crypto_ai_swing_supervisor_v3",
+            "schema_version": "crypto_ai_swing_supervisor_v4",
             "mode": self.mode,
+            "pid": os.getpid(),
+            "cycle_id": self._cycle_id,
             "started_at": started.isoformat(),
             "completed_at": _now().isoformat(),
+            "last_progress_at": _now().isoformat(),
+            "state": "DEGRADED" if errors else "HEALTHY",
+            "current_task": "IDLE",
+            "last_completed_task": self._last_completed_task,
             "tasks": tasks,
+            "native_reuse": self.operations.status(),
             "errors": errors,
             "live_authority_armed_by_supervisor": False,
             "automatic_model_live_promotion": False,
