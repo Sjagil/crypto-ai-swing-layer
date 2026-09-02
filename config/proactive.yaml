@@ -35,3 +35,11 @@ account:
   use_private_balances_in_shadow: false
   use_private_balances_in_paper: false
   require_private_balances_in_live: true
+
+timeframe_pipeline:
+  macro: [1w, 1d]
+  trend: [4h, 2h]
+  setup: 1h
+  trigger: 15m
+  execution: orderflow
+  lower_timeframes_can_override_macro: false

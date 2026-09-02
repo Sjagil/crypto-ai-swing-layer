@@ -43,6 +43,8 @@ def build_signal(
     row: pd.Series,
     ml_probability: float | None = None,
     forecast_score: float | None = None,
+    predicted_return: float | None = None,
+    predicted_mae: float | None = None,
     rl_score: float | None = None,
     nlp_score: float | None = None,
     nlp_confidence: float | None = None,
@@ -120,7 +122,12 @@ def build_signal(
     stop_pct = float(np.clip(1.8 * atr_pct, 0.008, 0.08))
     take_profit_pct = float(np.clip(3.0 * stop_pct, 0.025, 0.24))
     trailing_stop_pct = float(np.clip(1.4 * atr_pct, 0.008, 0.08))
-    expected_edge_bps = max(0.0, (score - 0.5) * 300.0)
+    if predicted_return is not None and np.isfinite(predicted_return):
+        expected_edge_bps = max(0.0, float(predicted_return) * 10_000.0)
+        edge_source = "QUALIFIED_RETURN_MODEL"
+    else:
+        expected_edge_bps = max(0.0, (score - 0.5) * 300.0)
+        edge_source = "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY"
 
     return Signal(
         market=market,
@@ -133,6 +140,7 @@ def build_signal(
         take_profit_pct=take_profit_pct,
         trailing_stop_pct=trailing_stop_pct,
         strategy=family,
+        edge_source=edge_source,
         votes=tuple(votes),
         features={
             k: float(row[k])
@@ -142,7 +150,9 @@ def build_signal(
                 "ret_8",
                 "trend_20_50",
                 "breakout_20",
-                "quote_volume_24h",
+                "quote_volume_24h", "price", "downside_rv_24",
+                "ewma_rv_24", "momentum_vol_adj_8", "drawdown_48",
+                "tail_q05_168",
             )
             if k in row and np.isfinite(row[k])
         },

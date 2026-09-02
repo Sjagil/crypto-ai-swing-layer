@@ -30,6 +30,7 @@ from sklearn.preprocessing import StandardScaler
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.universe.runtime import UniverseManager
+from crypto_ai_swing.quant.evidence import probability_diagnostics, native_model_selection_evidence, native_hac_evidence
 
 
 @dataclass(frozen=True)
@@ -341,6 +342,8 @@ class AgentTrainer:
         }
         tournament: list[dict[str, Any]] = []
         fitted: dict[str, Pipeline] = {}
+        validation_probabilities: dict[str, np.ndarray] = {}
+        threshold_rows: dict[str, list[dict[str, Any]]] = {}
         for name, model in candidates.items():
             model.fit(x_train, y_train)
             probability = model.predict_proba(x_val)[:, 1]
@@ -353,6 +356,8 @@ class AgentTrainer:
                 minimum_markets=min_val_markets,
             )
             chosen = dict(threshold_plan["chosen"])
+            validation_probabilities[name] = probability
+            threshold_rows[name] = list(threshold_plan["grid"])
             auc = _auc(y_val, probability)
             brier = float(brier_score_loss(y_val, probability))
             tournament.append({
@@ -380,6 +385,11 @@ class AgentTrainer:
                 -float(row.get("validation_brier") or 999.0),
             )
 
+        multiple_testing = native_model_selection_evidence(
+            validation, validation_probabilities, threshold_rows,
+            cost_floor=cost_floor, horizon_bars=horizon_bars,
+            crypto_repo_root=self.settings.crypto_repo_root,
+        )
         winner_row = max(tournament, key=rank)
         winner_name = str(winner_row["model"])
         alpha = fitted[winner_name]
@@ -404,6 +414,12 @@ class AgentTrainer:
         )
         test_auc = _auc(test["target_alpha"].astype(int), alpha_p)
         val_auc = winner_row.get("validation_auc")
+        validation_probability_quality = probability_diagnostics(y_val.to_numpy(int), validation_probabilities[winner_name])
+        test_probability_quality = probability_diagnostics(test["target_alpha"].astype(int).to_numpy(), alpha_p)
+        selected_hac_evidence = native_hac_evidence(
+            test, test_selected, cost_floor=cost_floor, horizon_bars=horizon_bars,
+            crypto_repo_root=self.settings.crypto_repo_root,
+        )
         positive_oos_net = bool(
             test_economics["count"] >= min_test_selected
             and test_economics["mean_net"] is not None
@@ -503,6 +519,11 @@ class AgentTrainer:
             "alpha_accuracy_at_0_5": float(
                 accuracy_score(test["target_alpha"].astype(int), alpha_p >= 0.5)
             ),
+            "validation_probability_quality": validation_probability_quality,
+            "test_probability_quality": test_probability_quality,
+            "model_threshold_multiple_testing": multiple_testing,
+            "selected_hac_evidence": selected_hac_evidence,
+            "implicit_model_threshold_trials": sum(len(v) for v in threshold_rows.values()),
             "selected_count": int(test_economics["count"]),
             "selected_market_count": int(test_economics["market_count"]),
             "selected_mean_forward_return": test_economics["mean_return"],

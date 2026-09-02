@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-CANONICAL_OUTCOME_SCHEMA = "forward_outcome_observed_time_next_open_v2"
+CANONICAL_OUTCOME_SCHEMA = "forward_outcome_observed_time_execution_tf_v3"
 LEGACY_OUTCOME_SCHEMA = "forward_outcome_candle_close_v1"
 
 
@@ -207,6 +207,12 @@ class ForwardEvidenceLedger:
         }
 
     @staticmethod
+    def _timeframe_hours(timeframe: str) -> float:
+        mapping={"5m":1/12,"15m":0.25,"1h":1.0,"2h":2.0,"4h":4.0,"1d":24.0}
+        if str(timeframe) not in mapping: raise ValueError(f"unsupported execution timeframe: {timeframe}")
+        return mapping[str(timeframe)]
+
+    @staticmethod
     def _utc_index(frame: pd.DataFrame) -> pd.DataFrame:
         selected = frame.sort_index().copy()
         if not isinstance(selected.index, pd.DatetimeIndex):
@@ -242,6 +248,7 @@ class ForwardEvidenceLedger:
         frames: Mapping[str, pd.DataFrame],
         *,
         horizons_hours: Iterable[int] = (1, 4, 24),
+        execution_timeframe: str = "1h",
     ) -> dict[str, Any]:
         horizons = tuple(
             sorted({int(value) for value in horizons_hours if int(value) > 0})
@@ -271,7 +278,11 @@ class ForwardEvidenceLedger:
                 continue
             # With closed 1h bars, the first fully causal execution proxy is the
             # first hourly open at or after actual observation time.
-            entry_bar_open = observed.ceil("1h")
+            frequency = {"5m":"5min","15m":"15min","1h":"1h","2h":"2h","4h":"4h","1d":"1D"}.get(str(execution_timeframe))
+            if frequency is None:
+                raise ValueError(f"unsupported execution timeframe: {execution_timeframe}")
+            interval = pd.to_timedelta(self._timeframe_hours(execution_timeframe), unit="h")
+            entry_bar_open = observed.ceil(frequency)
             if entry_bar_open not in frame.index:
                 skipped_unmatured += len(horizons)
                 continue
@@ -300,9 +311,7 @@ class ForwardEvidenceLedger:
                 if window.empty:
                     skipped_unmatured += 1
                     continue
-                last_close_time = (
-                    pd.Timestamp(window.index[-1]) + pd.Timedelta(1, unit="h")
-                )
+                last_close_time = pd.Timestamp(window.index[-1]) + interval
                 if last_close_time < horizon_end:
                     skipped_unmatured += 1
                     continue
@@ -338,7 +347,8 @@ class ForwardEvidenceLedger:
             "skipped_unmatured": skipped_unmatured,
             "skipped_missing_reference": skipped_missing_reference,
             "decision_bucket_minutes": self.decision_bucket_minutes,
-            "causal_reference": "FIRST_1H_OPEN_AT_OR_AFTER_OBSERVED_AT",
+            "causal_reference": "FIRST_EXECUTION_TIMEFRAME_OPEN_AT_OR_AFTER_OBSERVED_AT",
+            "execution_timeframe": execution_timeframe,
             **self.outcome_status(),
         }
 
@@ -633,7 +643,7 @@ class ForwardEvidenceLedger:
             "legacy_quality": self._legacy_quality(),
             "causality": {
                 "schema_version": CANONICAL_OUTCOME_SCHEMA,
-                "reference": "FIRST_1H_OPEN_AT_OR_AFTER_OBSERVED_AT",
+                "reference": "FIRST_EXECUTION_TIMEFRAME_OPEN_AT_OR_AFTER_OBSERVED_AT",
                 "decision_bucket_minutes": self.decision_bucket_minutes,
                 "mfe_non_negative": True,
                 "mae_non_positive": True,

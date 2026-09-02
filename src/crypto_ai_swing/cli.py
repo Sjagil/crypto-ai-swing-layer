@@ -297,13 +297,10 @@ def forward_mature(
                 }
             )
         )
-        frames = {
-            market: bridge.ohlcv(market, "1h", persist=False)
-            for market in ledger.observation_markets()
-        }
+        execution_tf = str(cfg.get("execution_timeframe", s.proactive.get("execution_timeframe", "15m")))
+        frames = {market: bridge.ohlcv(market, execution_tf, persist=False) for market in ledger.observation_markets()}
         payload = ledger.mature_from_frames(
-            frames,
-            horizons_hours=parsed or (1, 4, 24),
+            frames, horizons_hours=parsed or (1, 4, 24), execution_timeframe=execution_tf,
         )
         console.print_json(json.dumps(payload, default=str))
     finally:

@@ -15,7 +15,9 @@ DEFAULT_FEATURES: tuple[str, ...] = (
     "trend_8_20", "trend_20_50", "trend_50_200", "rsi_14", "atr_pct",
     "rv_24", "rv_168", "vol_regime", "bb_width", "bb_z", "breakout_20",
     "distance_low_20", "volume_z_48", "dollar_volume_log", "range_pct",
-    "close_location",
+    "close_location", "downside_rv_24", "ewma_rv_24", "skew_24",
+    "kurtosis_24", "momentum_vol_adj_8", "drawdown_48", "atr_z_168",
+    "tail_q05_168",
 )
 
 @dataclass(frozen=True)

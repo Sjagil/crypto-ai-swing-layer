@@ -11,6 +11,7 @@ from crypto_ai_swing.strategies.swing import build_signal
 from crypto_ai_swing.portfolio.allocator import allocate
 from crypto_ai_swing.execution.costs import estimate_cost
 from crypto_ai_swing.execution.shadow import ShadowLedger
+from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 
 
 @dataclass
@@ -23,6 +24,7 @@ class PipelineResult:
 class SwingPipeline:
     def __init__(self, settings):
         self.settings = settings
+        self.native = NativeOperationsBridge(settings.crypto_repo_root, project_root=settings.project_root)
 
     def run(
         self,
@@ -64,6 +66,8 @@ class SwingPipeline:
                 row,
                 ml_probability=context.get("ml_probability"),
                 forecast_score=context.get("forecast_score"),
+                predicted_return=context.get("predicted_return"),
+                predicted_mae=context.get("predicted_mae"),
                 rl_score=context.get("rl_score"),
                 nlp_score=context.get("nlp_score"),
                 nlp_confidence=context.get("nlp_confidence"),
@@ -109,6 +113,9 @@ class SwingPipeline:
                         {"market": signal.market, "blockers": blockers}
                     )
                 continue
+            if authority is Authority.LIVE and signal.edge_source == "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY":
+                blocked.append({"market": signal.market, "blockers": ["UNCALIBRATED_EXPECTED_EDGE_SOURCE"]})
+                continue
             if not risk.approved:
                 blocked.append(
                     {
@@ -117,12 +124,30 @@ class SwingPipeline:
                     }
                 )
                 continue
+            order_notional = risk.order_notional_eur
+            native_sizing = None
+            price = float(signal.features.get("price", 0.0) or 0.0)
+            if price > 0 and equity_eur > 0:
+                try:
+                    fn = self.native.native_interface("research.trading_math", "calculate_position_size_from_stop_fraction")
+                    trade_cfg = self.settings.risk.get("trade", {})
+                    portfolio_cfg = self.settings.risk.get("portfolio", {})
+                    cost_cfg = self.settings.execution.get("costs", {})
+                    native_sizing = fn(
+                        float(equity_eur), float(trade_cfg.get("risk_per_trade_fraction", 0.0065)), price, float(signal.stop_pct),
+                        fee_fraction_per_side=float(cost_cfg.get("fee_bps_per_side", 25.0))/10_000.0,
+                        slippage_fraction_per_side=float(cost_cfg.get("base_slippage_bps", 2.0))/10_000.0,
+                        max_position_fraction=float(portfolio_cfg.get("max_single_position_fraction", 0.25)), allow_fractional_units=True,
+                    )
+                    order_notional = min(order_notional, Decimal(str(native_sizing.position_notional)))
+                except Exception as exc:
+                    if authority is Authority.LIVE:
+                        blocked.append({"market": signal.market, "blockers": ["NATIVE_POSITION_SIZING_UNAVAILABLE", type(exc).__name__]})
+                        continue
             quote_volume = float(
                 signal.features.get("quote_volume_24h", 1_000_000.0)
             )
-            participation = float(risk.order_notional_eur) / max(
-                1.0, quote_volume
-            )
+            participation = float(order_notional) / max(1.0, quote_volume)
             cost = estimate_cost(
                 signal.expected_edge_bps,
                 spread_bps.get(signal.market, 10.0),
@@ -146,7 +171,7 @@ class SwingPipeline:
                 created_at=created,
                 market=signal.market,
                 side=signal.side,
-                notional_eur=risk.order_notional_eur,
+                notional_eur=order_notional,
                 expected_edge_bps=signal.expected_edge_bps,
                 estimated_round_trip_cost_bps=cost.round_trip_bps,
                 net_edge_bps=cost.net_edge_bps,
@@ -159,6 +184,8 @@ class SwingPipeline:
                 metadata={
                     "signal_score": signal.score,
                     "signal_confidence": signal.confidence,
+                    "edge_source": signal.edge_source,
+                    "native_position_sizing": (native_sizing.to_dict() if native_sizing is not None else None),
                     "portfolio_heat_after": risk.portfolio_heat_after,
                     "crypto_repo_context": context,
                 },

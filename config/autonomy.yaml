@@ -16,14 +16,15 @@ news:
 
 forward_evidence:
   enabled: true
-  path: output/crypto_ai_swing/forward/forward.sqlite
+  path: output/crypto_ai_swing/forward/forward_v3.sqlite
   record_shadow: true
   record_paper: true
   record_live: true
   mature_on_cycle: true
   horizons_hours: [1, 4, 24]
   decision_bucket_minutes: 15
-  outcome_schema: observed_time_next_open_v2
+  execution_timeframe: 15m
+  outcome_schema: observed_time_execution_tf_v3
   canary_readiness:
     primary_horizon_hours: 4
     minimum_unblocked_buy_outcomes: 30

@@ -65,6 +65,17 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["rv_24"] = ret1.rolling(24).std(ddof=0)
     out["rv_168"] = ret1.rolling(168).std(ddof=0)
     out["vol_regime"] = out["rv_24"] / out["rv_168"].replace(0.0, np.nan)
+    downside = ret1.clip(upper=0.0)
+    out["downside_rv_24"] = np.sqrt(downside.pow(2).rolling(24).mean())
+    out["ewma_rv_24"] = ret1.ewm(span=24, adjust=False, min_periods=24).std(bias=True)
+    out["skew_24"] = ret1.rolling(24).skew()
+    out["kurtosis_24"] = ret1.rolling(24).kurt()
+    out["momentum_vol_adj_8"] = out["ret_8"] / (out["rv_24"] * np.sqrt(8.0)).replace(0.0, np.nan)
+    peak48 = x["close"].rolling(48, min_periods=2).max()
+    out["drawdown_48"] = x["close"] / peak48 - 1.0
+    atr_mean = out["atr_pct"].rolling(168).mean(); atr_std = out["atr_pct"].rolling(168).std(ddof=0)
+    out["atr_z_168"] = (out["atr_pct"] - atr_mean) / atr_std.replace(0.0, np.nan)
+    out["tail_q05_168"] = ret1.rolling(168).quantile(0.05)
 
     mid = x["close"].rolling(20).mean()
     std = x["close"].rolling(20).std(ddof=0)

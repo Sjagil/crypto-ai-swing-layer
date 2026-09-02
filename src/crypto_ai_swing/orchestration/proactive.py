@@ -30,6 +30,7 @@ from crypto_ai_swing.nlp.sources import (
 from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
+from crypto_ai_swing.orchestration.timeframe_pipeline import evaluate_timeframe_pipeline
 from crypto_ai_swing.agents.runtime import AgentRuntime
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
@@ -642,6 +643,8 @@ class ProactiveTrader:
             )
         )
         primary = str(self.settings.proactive.get("primary_signal_timeframe", "1h"))
+        execution_tf = str(self.settings.proactive.get("execution_timeframe", "15m"))
+        observed_at = datetime.now(timezone.utc)
         depth = int(self.settings.proactive.get("orderbook_depth", 100))
         deep_scan_limit = max(1, int(self.settings.proactive.get("deep_scan_limit", 8)))
         concurrency = max(1, min(8, int(self.settings.proactive.get("screen_concurrency", 4))))
@@ -663,8 +666,7 @@ class ProactiveTrader:
             if frame is None or frame.empty:
                 skipped.append({"market": market, "reason": "NO_PRIMARY_SCREEN_CANDLES"})
                 continue
-            decision_at = frame.index[-1] + pd.to_timedelta(primary_seconds, unit="s")
-            causal = self.crypto.causal_frame(frame, primary, decision_at)
+            causal = self.crypto.causal_frame(frame, primary, observed_at)
             if causal.empty:
                 skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_SCREEN_CANDLE"})
                 continue
@@ -726,6 +728,7 @@ class ProactiveTrader:
         prospective_status = str(prospective_context.get("status") or "UNKNOWN").upper()
         prospective_block = prospective_status in {"BLOCK_NEW_ENTRIES", "BLOCKED", "FAILED", "NOT_READY"}
         frames: dict[str, pd.DataFrame] = {}
+        forward_frames: dict[str, pd.DataFrame] = {}
 
         for market in deep_markets:
             try:
@@ -739,15 +742,16 @@ class ProactiveTrader:
                     market, timeframes, persist=persist
                 )
                 mtf_frames[primary] = bundle.frame
-                decision_at = bundle.frame.index[-1] + pd.to_timedelta(primary_seconds, unit="s")
-                causal_frames = {
-                    tf: self.crypto.causal_frame(frame, tf, decision_at)
-                    for tf, frame in mtf_frames.items()
-                }
+                decision_at = observed_at
+                causal_frames = {tf: self.crypto.causal_frame(frame, tf, decision_at) for tf, frame in mtf_frames.items()}
                 if causal_frames.get(primary) is None or causal_frames[primary].empty:
                     skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_CANDLE"})
                     continue
-                mtf = self._mtf_score(causal_frames)
+                tf_decision = evaluate_timeframe_pipeline(
+                    causal_frames, bundle.microstructure, observed_at=observed_at,
+                    maximum_spread_bps=float(self.settings.execution.get("liquidity", {}).get("maximum_spread_bps", 35.0)),
+                )
+                mtf = tf_decision.mtf_score
                 orderflow = self._orderflow_score(bundle.microstructure)
                 quote_volume = self.crypto.quote_volume_24h(bundle.ticker, bundle.microstructure)
                 frame = causal_frames[primary].copy()
@@ -756,10 +760,8 @@ class ProactiveTrader:
                 nlp_aggregation = self.nlp.aggregate_with_diagnostics(docs, market)
                 assessment = nlp_aggregation.assessment
                 entry_blocked = bool(
-                    prospective_block
-                    and self.settings.proactive.get("context_gates", {}).get(
-                        "block_on_prospective_context_block", True
-                    )
+                    (prospective_block and self.settings.proactive.get("context_gates", {}).get("block_on_prospective_context_block", True))
+                    or tf_decision.entry_blocked
                 )
                 context[market] = {
                     "nlp_score": assessment.score,
@@ -769,6 +771,7 @@ class ProactiveTrader:
                     "nlp_model": assessment.model,
                     "nlp_diagnostics": nlp_aggregation.diagnostics,
                     "mtf_score": mtf,
+                    "timeframe_pipeline": tf_decision.to_dict(),
                     "orderflow_score": orderflow,
                     "book_imbalance": bundle.microstructure.get("book_imbalance", 0.0),
                     "cvd_ratio": bundle.microstructure.get("cvd_ratio", 0.0),
@@ -809,11 +812,9 @@ class ProactiveTrader:
                     if head_influence.get("alpha")
                     else None
                 )
-                context[market]["forecast_score"] = (
-                    agent_decision.forecast_score
-                    if head_influence.get("return")
-                    else None
-                )
+                context[market]["forecast_score"] = (agent_decision.forecast_score if head_influence.get("return") else None)
+                context[market]["predicted_return"] = (agent_decision.predicted_return if head_influence.get("return") else None)
+                context[market]["predicted_mae"] = (agent_decision.predicted_mae if head_influence.get("risk") else None)
                 context[market]["agent_entry_blocked"] = bool(
                     agent_decision.entry_blocked
                 )
@@ -822,6 +823,9 @@ class ProactiveTrader:
                     tf: len(causal_frames.get(tf, pd.DataFrame())) for tf in timeframes
                 }
                 frames[market] = frame
+                execution_frame = causal_frames.get(execution_tf)
+                if execution_frame is not None and not execution_frame.empty:
+                    forward_frames[market] = execution_frame.copy()
             except Exception as exc:
                 skipped.append({"market": market, "reason": type(exc).__name__, "detail": str(exc)[:300]})
 
@@ -887,7 +891,8 @@ class ProactiveTrader:
             "mtf_rows": mtf_summary,
             "signals": [
                 {"market": s.market, "side": s.side.value, "score": s.score,
-                 "edge_bps": s.expected_edge_bps, "votes": [v.source for v in s.votes]}
+                 "edge_bps": s.expected_edge_bps, "edge_source": s.edge_source,
+                 "votes": [v.source for v in s.votes]}
                 for s in result.signals
             ],
             "market_context": context,
@@ -911,7 +916,9 @@ class ProactiveTrader:
             payload["forward_evidence"] = self.forward.append_cycle(payload, candle_times)
             if bool(forward_cfg.get("mature_on_cycle", True)):
                 horizons = tuple(int(value) for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or []) if int(value) > 0)
-                payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(frames, horizons_hours=horizons or (1, 4, 24))
+                payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(
+                    forward_frames, horizons_hours=horizons or (1, 4, 24), execution_timeframe=execution_tf
+                )
             payload["forward_evidence"]["ledger"] = self.forward.status()
             payload["forward_evidence"]["outcomes"] = self.forward.outcome_status()
         else:

@@ -44,6 +44,7 @@ class Signal:
     take_profit_pct: float
     trailing_stop_pct: float
     strategy: str
+    edge_source: str = "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY"
     votes: tuple[ModelVote, ...] = ()
     features: dict[str, float] = field(default_factory=dict)
 
