@@ -23,6 +23,19 @@ NATIVE_RESEARCH_MODULES = (
     "research.combinatorial_lab",
     "research.alpha_discovery",
     "research.features",
+    "research.regime_router",
+    "research.residual_momentum",
+    "research.residual_reversal",
+    "research.multi_horizon_trend",
+    "research.absolute_momentum",
+    "research.multi_alpha_ensemble",
+    "research.multi_alpha_ensemble_v2",
+    "research.residual_momentum_campaign",
+    "research.residual_reversal_campaign",
+    "research.multi_horizon_trend_campaign",
+    "research.multi_alpha_ensemble_v2_campaign",
+    "research.peer_residual_reversal",
+    "research.peer_residual_reversal_campaign",
 )
 
 

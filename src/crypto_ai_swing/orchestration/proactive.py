@@ -185,7 +185,16 @@ class ProactiveTrader:
             "state_path",
             "output/crypto_ai_swing/proactive/state.sqlite",
         )
-        self.state = ProactiveState(settings.project_root / state_rel)
+        state_name = Path(str(state_rel)).name or "state.sqlite"
+        public_mode = "canary" if self.mode == "live" else self.mode
+        self.mode_root = (
+            settings.project_root
+            / "output/crypto_ai_swing/modes"
+            / public_mode
+        )
+        self.state = ProactiveState(
+            self.mode_root / "proactive" / state_name
+        )
         self.nlp = NLPMarketEngine(settings.nlp)
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         # Direct REST is retained only for the already-existing private
@@ -934,9 +943,22 @@ class ProactiveTrader:
 
         payload["prospective_canary_readiness"] = self._prospective_canary_readiness()
 
-        out = self.settings.project_root / "output/crypto_ai_swing/proactive/latest.json"
+        out = self.mode_root / "proactive" / "latest.json"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        out.write_text(
+            json.dumps(payload, indent=2, default=str),
+            encoding="utf-8",
+        )
+        if self.mode == "shadow":
+            legacy = (
+                self.settings.project_root
+                / "output/crypto_ai_swing/proactive/latest.json"
+            )
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text(
+                json.dumps(payload, indent=2, default=str),
+                encoding="utf-8",
+            )
         return payload
 
     def run_forever(self, interval_seconds: int = 60) -> None:
@@ -948,8 +970,9 @@ class ProactiveTrader:
                 raise
             except Exception as exc:
                 out = (
-                    self.settings.project_root
-                    / "output/crypto_ai_swing/proactive/errors.jsonl"
+                    self.mode_root
+                    / "proactive"
+                    / "errors.jsonl"
                 )
                 out.parent.mkdir(parents=True, exist_ok=True)
                 with out.open("a", encoding="utf-8") as fh:
