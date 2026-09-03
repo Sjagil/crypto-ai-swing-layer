@@ -57,6 +57,13 @@ references:
     directory: references/Lean
     isolated_env: .venvs/lean
 
+  lean_cli:
+    enabled: false
+    role: optional_lean_cli_orchestration
+    repository: https://github.com/QuantConnect/lean-cli.git
+    directory: references/lean-cli
+    isolated_env: .venvs/lean-cli
+
   moondev:
     enabled: false
     role: optional_research_agent_patterns
@@ -69,18 +76,21 @@ references:
     role: excluded_equity_first_panel_stack
     repository: https://github.com/microsoft/qlib.git
     directory: references/qlib
+    isolated_env: .venvs/qlib
 
   pybroker:
     enabled: false
     role: excluded_equity_oriented_backtester
     repository: https://github.com/edtechre/pybroker.git
     directory: references/pybroker
+    isolated_env: .venvs/pybroker
 
   vnpy:
     enabled: false
     role: excluded_not_required_for_bitvavo_layer
     repository: https://github.com/vnpy/vnpy.git
     directory: references/vnpy
+    isolated_env: .venvs/vnpy
 
   vnpy_ib:
     enabled: false

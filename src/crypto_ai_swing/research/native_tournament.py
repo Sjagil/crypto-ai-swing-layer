@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from crypto_ai_swing.bridge.native_foundation import NativeFoundationBridge
+from crypto_ai_swing.research.native_dependencies import (
+    inspect_native_campaign_dependencies,
+)
 
 DEFAULT_CAMPAIGNS = (
     "residual-momentum",
@@ -44,6 +47,42 @@ def run_native_alpha_tournament(
         selected = str(campaign).strip().lower()
         if not selected:
             continue
+
+        try:
+            preflight = inspect_native_campaign_dependencies(
+                crypto_repo_root=crypto_repo_root,
+                campaign=selected,
+            )
+        except Exception as exc:  # noqa: BLE001
+            preflight = {
+                "schema_version": "crypto_ai_swing_native_campaign_dependencies_v1",
+                "campaign": selected,
+                "ready": False,
+                "classification": "BLOCKED_DEPENDENCY_INSPECTION",
+                "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                "repair_commands": [],
+                "orders_generated": 0,
+                "orders_submitted": 0,
+            }
+
+        if not bool(preflight.get("ready")):
+            rows.append(
+                {
+                    "campaign": selected,
+                    "classification": (
+                        "BLOCKED_PREREQUISITE_EVIDENCE"
+                        if preflight.get("classification")
+                        == "BLOCKED_PREREQUISITE_EVIDENCE"
+                        else "BLOCKED_INFRASTRUCTURE"
+                    ),
+                    "summary": None,
+                    "source": None,
+                    "dependency_preflight": preflight,
+                    "error": preflight.get("error"),
+                }
+            )
+            continue
+
         try:
             payload = bridge.run_alpha_campaign(selected)
             row = {
@@ -51,6 +90,7 @@ def run_native_alpha_tournament(
                 "classification": _classification(payload),
                 "summary": payload.get("summary"),
                 "source": payload.get("source"),
+                "dependency_preflight": preflight,
                 "error": None,
             }
         except Exception as exc:  # noqa: BLE001
@@ -59,16 +99,21 @@ def run_native_alpha_tournament(
                 "classification": "BLOCKED_INFRASTRUCTURE",
                 "summary": None,
                 "source": None,
+                "dependency_preflight": preflight,
                 "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
             }
         rows.append(row)
 
     return {
-        "schema_version": "crypto_ai_swing_native_alpha_tournament_v1",
+        "schema_version": "crypto_ai_swing_native_alpha_tournament_v2",
         "generated_at": datetime.now(UTC).isoformat(),
         "campaigns": rows,
         "counts": {
             "total": len(rows),
+            "blocked_prerequisite_evidence": sum(
+                row["classification"] == "BLOCKED_PREREQUISITE_EVIDENCE"
+                for row in rows
+            ),
             "blocked_infrastructure": sum(
                 row["classification"] == "BLOCKED_INFRASTRUCTURE"
                 for row in rows
