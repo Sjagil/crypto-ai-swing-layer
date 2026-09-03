@@ -33,7 +33,14 @@ def test_round10_supervisor_has_progress_heartbeat_and_native_ops():
 
 
 def test_round10_runtime_health_supports_busy_state_and_pid():
-    source = (ROOT / "scripts/runtime_health.py").read_text()
-    assert "HEALTHY_BUSY" in source
-    assert "last_progress_at" in source
-    assert "SUPERVISOR_PID_NOT_ALIVE" in source
+    wrapper = (ROOT / "scripts/runtime_health.py").read_text()
+    health = (
+        ROOT
+        / "src/crypto_ai_swing/orchestration/health.py"
+    ).read_text()
+
+    assert "runtime_health" in wrapper
+    assert "HEALTHY_BUSY" in health
+    assert "last_progress_at" in health
+    assert "SUPERVISOR_PID_NOT_ALIVE" in health
+    assert "ONESHOT_COMPLETE" in health

@@ -173,7 +173,7 @@ class AutonomousSupervisor:
         finally:
             ledger.close()
 
-    def run_once(self) -> dict[str, Any]:
+    def run_once(self, *, one_shot: bool = False) -> dict[str, Any]:
         started = _now()
         self._cycle_id = uuid.uuid4().hex
         self._cycle_started_at = started.isoformat()
@@ -318,7 +318,18 @@ class AutonomousSupervisor:
             "started_at": started.isoformat(),
             "completed_at": _now().isoformat(),
             "last_progress_at": _now().isoformat(),
-            "state": "DEGRADED" if errors else "HEALTHY",
+            "state": (
+                "DEGRADED"
+                if errors
+                else "ONESHOT_COMPLETE"
+                if one_shot
+                else "HEALTHY"
+            ),
+            "task_status": (
+                "COMPLETE"
+                if one_shot and not errors
+                else None
+            ),
             "current_task": "IDLE",
             "last_completed_task": self._last_completed_task,
             "tasks": tasks,
@@ -335,7 +346,7 @@ class AutonomousSupervisor:
         while True:
             started = time.time()
             try:
-                self.run_once()
+                self.run_once(one_shot=False)
             except KeyboardInterrupt:
                 raise
             except Exception:

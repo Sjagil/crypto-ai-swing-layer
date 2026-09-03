@@ -28,6 +28,22 @@ from .execution.crypto_authority import CryptoAuthorityAdapter
 from .orchestration.supervisor import AutonomousSupervisor
 from .universe.runtime import UniverseManager
 from .research.bootstrap import ColdStartResearchRunner
+from .bridge.native_foundation import NativeFoundationBridge
+from .data.quality import audit_ohlcv_frame, aggregate_quality
+from .research.patterns import latest_pattern_snapshot
+from .orchestration.control_plane import ModeController
+from .orchestration.health import runtime_health
+from .execution.paper_certification import certify_paper_lifecycle
+from .data.canonical_history import CanonicalHistoryManager
+from .data.provider_semantics import (
+    ProviderSemanticAuditor,
+    aggregate_provider_semantics,
+)
+from .research.native_tournament import (
+    DEFAULT_CAMPAIGNS,
+    run_native_alpha_tournament,
+    write_tournament,
+)
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -668,10 +684,28 @@ def live_canary_preflight() -> None:
         }, default=str))
         return
 
-    latest = s.project_root / "output/crypto_ai_swing/proactive/latest.json"
+    latest = (
+        s.project_root
+        / "output/crypto_ai_swing/modes/shadow/proactive/latest.json"
+    )
     if not latest.is_file():
-        raise typer.BadParameter("Run proactive --mode shadow --once first")
+        legacy = (
+            s.project_root
+            / "output/crypto_ai_swing/proactive/latest.json"
+        )
+        if legacy.is_file():
+            candidate = json.loads(legacy.read_text())
+            if str(candidate.get("mode") or "").lower() == "shadow":
+                latest = legacy
+    if not latest.is_file():
+        raise typer.BadParameter(
+            "Run proactive --mode shadow --once first"
+        )
     report = json.loads(latest.read_text())
+    if str(report.get("mode") or "").lower() != "shadow":
+        raise typer.BadParameter(
+            "Canary preflight requires SHADOW artifact"
+        )
     candidates = [
         dict(x.get("intent") or {})
         for x in report.get("executions") or []
@@ -718,9 +752,1077 @@ def supervisor(
     if mode not in {"shadow","paper","live"}: raise typer.BadParameter("invalid mode")
     s=_settings();runner=AutonomousSupervisor(s,mode=mode)
     try:
-        if once: console.print_json(json.dumps(runner.run_once(),default=str))
-        else: runner.run_forever()
+        if once:
+            console.print_json(
+                json.dumps(
+                    runner.run_once(one_shot=True),
+                    default=str,
+                )
+            )
+        else:
+            runner.run_forever()
     finally: runner.close()
+
+@app.command("foundation-status")
+def foundation_status() -> None:
+    """Inspect the deep canonical Sjagil/crypto foundation."""
+    s = _settings()
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/foundation/status.json"
+    )
+    payload = NativeFoundationBridge(
+        s.crypto_repo_root
+    ).write_status(out)
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("data-sync")
+def data_sync(
+    markets: str = typer.Option(
+        "",
+        help="Comma list. Empty = current runtime universe.",
+    ),
+    timeframes: str = typer.Option(
+        "15m,1h,2h,4h,1d"
+    ),
+    concurrency: int = typer.Option(
+        3,
+        min=1,
+        max=8,
+    ),
+) -> None:
+    """Refresh/persist canonical Sjagil/crypto OHLCV chains."""
+    s = _settings()
+    selected = [
+        x.strip().upper()
+        for x in markets.split(",")
+        if x.strip()
+    ]
+    if not selected:
+        selected = list(
+            UniverseManager(s).current()["markets"]
+        )
+    selected_timeframes = [
+        x.strip()
+        for x in timeframes.split(",")
+        if x.strip()
+    ]
+
+    bridge = CryptoLibraryBridge(
+        s.crypto_repo_root
+    )
+    native_settings = bridge.settings()
+    rows = []
+    for timeframe in selected_timeframes:
+        frames = bridge.ohlcv_many(
+            selected,
+            timeframe,
+            persist=True,
+            concurrency=concurrency,
+        )
+        for market in selected:
+            frame = frames.get(market)
+            normalized_tf = (
+                "1W"
+                if timeframe.lower() == "1w"
+                else timeframe
+            )
+            flat_path = (
+                native_settings.paths.processed_data_dir
+                / f"{market}_{normalized_tf}.parquet"
+            )
+            rows.append(
+                {
+                    "market": market,
+                    "timeframe": timeframe,
+                    "rows": (
+                        int(len(frame))
+                        if frame is not None
+                        else 0
+                    ),
+                    "canonical_flat_path": str(flat_path),
+                    "canonical_flat_present": flat_path.is_file(),
+                    "status": (
+                        "CANONICAL_FLAT_PRESENT"
+                        if flat_path.is_file()
+                        else "FETCHED_RECENT_NOT_CANONICAL_FLAT"
+                        if frame is not None and not frame.empty
+                        else "EMPTY"
+                    ),
+                }
+            )
+
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_data_sync_v1"
+        ),
+        "source": "Sjagil/crypto:data.data_loader",
+        "markets": len(selected),
+        "timeframes": selected_timeframes,
+        "series": rows,
+        "empty_series": sum(
+            row["status"] == "EMPTY"
+            for row in rows
+        ),
+        "canonical_missing_series": sum(
+            not bool(row.get("canonical_flat_present"))
+            for row in rows
+        ),
+        "orders_generated": 0,
+        "orders_submitted": 0,
+    }
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality"
+        / "data_sync_latest.json"
+    )
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    out.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("data-quality")
+def data_quality(
+    markets: str = typer.Option(
+        "",
+        help="Comma list. Empty = current runtime universe.",
+    ),
+    timeframes: str = typer.Option(
+        "15m,1h,4h,1d"
+    ),
+    deep: bool = typer.Option(
+        False,
+        "--deep/--native-only",
+        help=(
+            "Also fetch frames and run enhanced "
+            "non-mutating audits."
+        ),
+    ),
+) -> None:
+    """Run native candle health and optional deep audits."""
+    s = _settings()
+    selected = [
+        x.strip().upper()
+        for x in markets.split(",")
+        if x.strip()
+    ]
+    if not selected:
+        selected = list(
+            UniverseManager(s).current()["markets"]
+        )
+    selected_timeframes = [
+        x.strip()
+        for x in timeframes.split(",")
+        if x.strip()
+    ]
+
+    foundation = NativeFoundationBridge(
+        s.crypto_repo_root
+    )
+    native = foundation.candle_health(
+        markets=selected,
+        timeframes=selected_timeframes,
+    )
+
+    enhanced: list[dict] = []
+    if deep:
+        bridge = CryptoLibraryBridge(
+            s.crypto_repo_root
+        )
+        for timeframe in selected_timeframes:
+            frames = bridge.ohlcv_many(
+                selected,
+                timeframe,
+                persist=False,
+                concurrency=4,
+            )
+            for market in selected:
+                try:
+                    report = audit_ohlcv_frame(
+                        frames.get(market),
+                        timeframe=timeframe,
+                        policy=s.data_quality,
+                    )
+                except Exception as exc:
+                    report = {
+                        "status": "BLOCKED",
+                        "healthy": False,
+                        "reason_codes": [
+                            "AUDIT_"
+                            + type(exc).__name__.upper()
+                        ],
+                        "error": str(exc)[:300],
+                    }
+                enhanced.append(
+                    {
+                        "market": market,
+                        "timeframe": timeframe,
+                        **report,
+                    }
+                )
+
+    enhanced_summary = (
+        aggregate_quality(enhanced)
+        if enhanced
+        else None
+    )
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_data_quality_v2"
+        ),
+        "native": native,
+        "enhanced": enhanced,
+        "enhanced_summary": enhanced_summary,
+        "all_healthy": (
+            bool(native.get("all_healthy"))
+            and (
+                enhanced_summary is None
+                or bool(
+                    enhanced_summary.get("all_healthy")
+                )
+            )
+        ),
+        "orders_submitted": 0,
+    }
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality/latest.json"
+    )
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    out.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("pit-data-certify")
+def pit_data_certify() -> None:
+    """Certify the strict native daily point-in-time tensor."""
+    s = _settings()
+    try:
+        payload = NativeFoundationBridge(
+            s.crypto_repo_root
+        ).pit_feature_store_certification()
+    except Exception as exc:
+        payload = {
+            "schema_version": (
+                "crypto_ai_swing_pit_foundation_cert_v1"
+            ),
+            "status": "BLOCKED",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:1000],
+            "live_decision_influence": False,
+            "automatic_live_promotion": False,
+            "orders_submitted": 0,
+        }
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality"
+        / "pit_certification.json"
+    )
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    out.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("pattern-scan")
+def pattern_scan(
+    timeframe: str = typer.Option("1h"),
+    markets: str = typer.Option(
+        "",
+        help="Comma list. Empty = current runtime universe.",
+    ),
+) -> None:
+    """Scan causal structural patterns on native candles."""
+    s = _settings()
+    selected = [
+        x.strip().upper()
+        for x in markets.split(",")
+        if x.strip()
+    ]
+    if not selected:
+        selected = list(
+            UniverseManager(s).current()["markets"]
+        )
+
+    bridge = CryptoLibraryBridge(
+        s.crypto_repo_root
+    )
+    frames = bridge.ohlcv_many(
+        selected,
+        timeframe,
+        persist=False,
+        concurrency=4,
+    )
+    rows = []
+    for market in selected:
+        try:
+            snapshot = latest_pattern_snapshot(
+                frames[market]
+            )
+        except Exception as exc:
+            snapshot = {
+                "status": "BLOCKED",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:300],
+                "constructive_pattern_count": 0,
+                "adverse_pattern_count": 0,
+                "authority": "RESEARCH_ONLY",
+            }
+        rows.append(
+            {
+                "market": market,
+                **snapshot,
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            int(
+                row.get(
+                    "constructive_pattern_count"
+                )
+                or 0
+            )
+            - int(
+                row.get(
+                    "adverse_pattern_count"
+                )
+                or 0
+            )
+        ),
+        reverse=True,
+    )
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_pattern_scan_v1"
+        ),
+        "timeframe": timeframe,
+        "markets": len(rows),
+        "rows": rows,
+        "authority": "RESEARCH_ONLY",
+        "live_decision_influence": False,
+        "orders_submitted": 0,
+    }
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/research"
+        / "pattern_scan_latest.json"
+    )
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    out.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("native-alpha-status")
+def native_alpha_status() -> None:
+    """Show directly reusable native alpha campaigns."""
+    s = _settings()
+    payload = NativeFoundationBridge(
+        s.crypto_repo_root
+    ).alpha_catalog()
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("native-alpha-run")
+def native_alpha_run(
+    campaign: str = typer.Argument(
+        "residual-momentum"
+    ),
+) -> None:
+    """Run one native alpha campaign research-only."""
+    s = _settings()
+    try:
+        payload = NativeFoundationBridge(
+            s.crypto_repo_root
+        ).run_alpha_campaign(campaign)
+    except Exception as exc:
+        payload = {
+            "schema_version": (
+                "crypto_ai_swing_native_alpha_run_v1"
+            ),
+            "requested_campaign": campaign,
+            "status": "BLOCKED",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:1000],
+            "authority": "RESEARCH_ONLY",
+            "automatic_live_promotion": False,
+            "orders_submitted": 0,
+        }
+
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/research"
+        / (
+            "native_alpha_"
+            + campaign.replace("-", "_")
+            + ".json"
+        )
+    )
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    out.write_text(
+        json.dumps(
+            payload,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("mode-status")
+def mode_status() -> None:
+    s = _settings()
+    console.print_json(
+        json.dumps(
+            ModeController(s).status(),
+            default=str,
+        )
+    )
+
+
+@app.command("mode-preflight")
+def mode_preflight(
+    target: str = typer.Option(
+        ...,
+        help="shadow, paper, or canary",
+    ),
+) -> None:
+    s = _settings()
+    try:
+        payload = ModeController(s).preflight(
+            target
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(
+            str(exc)
+        ) from exc
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("mode-switch")
+def mode_switch(
+    target: str = typer.Option(
+        ...,
+        help="shadow, paper, or canary",
+    ),
+) -> None:
+    s = _settings()
+    try:
+        payload = ModeController(s).switch(
+            target
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(
+            str(exc)
+        ) from exc
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("health")
+def health(
+    max_age: float = typer.Option(
+        900.0,
+        min=1.0,
+    ),
+) -> None:
+    s = _settings()
+    heartbeat = (
+        s.project_root
+        / "output/crypto_ai_swing/supervisor"
+        / "heartbeat.json"
+    )
+    console.print_json(
+        json.dumps(
+            runtime_health(
+                heartbeat,
+                max_age=max_age,
+            ),
+            default=str,
+        )
+    )
+
+
+@app.command("runtime-status")
+def runtime_status() -> None:
+    s = _settings()
+    controller = ModeController(s)
+    heartbeat = (
+        s.project_root
+        / "output/crypto_ai_swing/supervisor"
+        / "heartbeat.json"
+    )
+
+    ledger = _forward_ledger(s)
+    try:
+        forward_payload = ledger.status()
+        readiness = _configured_canary_readiness(
+            s,
+            ledger,
+        )
+    finally:
+        ledger.close()
+
+    try:
+        canary = CryptoAuthorityAdapter(
+            s.crypto_repo_root
+        ).authority_status()
+    except Exception as exc:
+        canary = {
+            "status": "UNAVAILABLE",
+            "error": (
+                f"{type(exc).__name__}: "
+                f"{str(exc)[:300]}"
+            ),
+        }
+
+    foundation = NativeFoundationBridge(
+        s.crypto_repo_root
+    ).status()
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_runtime_status_v1"
+        ),
+        "mode": controller.status(),
+        "health": runtime_health(
+            heartbeat,
+            max_age=900.0,
+        ),
+        "forward": forward_payload,
+        "prospective_canary_readiness": readiness,
+        "agent": AgentRuntime(s).status(),
+        "native_foundation": {
+            "ready": foundation.ready,
+            "imported_modules": (
+                foundation.imported_modules
+            ),
+            "required_modules": (
+                foundation.required_modules
+            ),
+        },
+        "canary_authority": canary,
+        "automatic_live_promotion": False,
+    }
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("research-status")
+def research_status() -> None:
+    s = _settings()
+    native = NativeResearchBridge(
+        s.crypto_repo_root
+    ).status()
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_research_status_v1"
+        ),
+        "native_research_ready": native.ready,
+        "native_research_modules": (
+            native.imported_modules
+        ),
+        "native_research_required": (
+            native.required_modules
+        ),
+        "promotion_states": list(
+            native.promotion_states
+        ),
+        "native_alpha": NativeFoundationBridge(
+            s.crypto_repo_root
+        ).alpha_catalog(),
+        "agent": AgentRuntime(s).status(),
+        "automatic_live_promotion": False,
+        "orders_submitted": 0,
+    }
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("alpha-status")
+def alpha_status() -> None:
+    s = _settings()
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_alpha_status_v1"
+        ),
+        "agent": AgentRuntime(s).status(),
+        "native_alpha": NativeFoundationBridge(
+            s.crypto_repo_root
+        ).alpha_catalog(),
+        "live_decision_influence": False,
+        "automatic_live_promotion": False,
+    }
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("portfolio-status")
+def portfolio_status() -> None:
+    s = _settings()
+    adapter = CryptoAuthorityAdapter(
+        s.crypto_repo_root
+    )
+    try:
+        authority = adapter.authority_status()
+    except Exception as exc:
+        authority = {
+            "status": "UNAVAILABLE",
+            "error": (
+                f"{type(exc).__name__}: "
+                f"{str(exc)[:300]}"
+            ),
+        }
+    try:
+        portfolio = adapter.portfolio()
+    except Exception as exc:
+        portfolio = {
+            "status": "UNAVAILABLE",
+            "error": (
+                f"{type(exc).__name__}: "
+                f"{str(exc)[:300]}"
+            ),
+        }
+
+    payload = {
+        "schema_version": (
+            "crypto_ai_swing_portfolio_status_v1"
+        ),
+        "native_authority": authority,
+        "native_portfolio": portfolio,
+        "source": (
+            "Sjagil/crypto:core.swing_layer_live"
+        ),
+        "orders_submitted": 0,
+    }
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("paper-certify")
+def paper_certify() -> None:
+    """Certify offline fee/slippage/PnL semantics."""
+    s = _settings()
+    costs = dict(
+        (s.execution or {}).get(
+            "costs",
+            {},
+        )
+        or {}
+    )
+    payload = certify_paper_lifecycle(
+        s.project_root,
+        fee_bps_per_side=float(
+            costs.get(
+                "fee_bps_per_side",
+                25.0,
+            )
+        ),
+        slippage_bps_per_side=float(
+            costs.get(
+                "base_slippage_bps",
+                2.0,
+            )
+        ),
+    )
+    console.print_json(
+        json.dumps(payload, default=str)
+    )
+
+
+@app.command("run")
+def run_selected_mode(
+    once: bool = typer.Option(False),
+) -> None:
+    """Run supervisor from persistent mode state."""
+    s = _settings()
+    controller = ModeController(s)
+    selected = controller.status()[
+        "selected_mode"
+    ]
+    preflight = controller.preflight(
+        selected
+    )
+    if not bool(preflight.get("ready")):
+        console.print_json(
+            json.dumps(
+                {
+                    "status": (
+                        "BLOCKED_MODE_PREFLIGHT"
+                    ),
+                    "mode": selected,
+                    "preflight": preflight,
+                    "orders_submitted": 0,
+                },
+                default=str,
+            )
+        )
+        raise typer.Exit(code=2)
+
+    runner = AutonomousSupervisor(
+        s,
+        mode=preflight["runtime_mode"],
+    )
+    try:
+        if once:
+            console.print_json(
+                json.dumps(
+                    runner.run_once(
+                        one_shot=True
+                    ),
+                    default=str,
+                )
+            )
+        else:
+            runner.run_forever()
+    finally:
+        runner.close()
+
+@app.command("storage-doctor")
+def storage_doctor(
+    markets: str = typer.Option(
+        "BTC-EUR,ETH-EUR,SOL-EUR,LINK-EUR"
+    ),
+    timeframes: str = typer.Option("15m,1h,2h,4h,1d"),
+) -> None:
+    s = _settings()
+    selected_markets = [
+        x.strip().upper() for x in markets.split(",") if x.strip()
+    ]
+    selected_timeframes = [
+        x.strip() for x in timeframes.split(",") if x.strip()
+    ]
+    payload = CanonicalHistoryManager(s).storage_status(
+        provider="bitvavo",
+        markets=selected_markets,
+        timeframes=selected_timeframes,
+    )
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("canonical-history-sync")
+def canonical_history_sync(
+    profile: str = typer.Option(
+        "residual-momentum",
+        help="residual-momentum or swing-core",
+    ),
+) -> None:
+    s = _settings()
+    try:
+        payload = CanonicalHistoryManager(s).sync_profile(profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    out = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality/canonical_history_latest.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(payload, indent=2, default=str),
+        encoding="utf-8",
+    )
+    payload["output"] = str(out)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("native-alpha-preflight")
+def native_alpha_preflight(
+    campaign: str = typer.Argument("residual-momentum"),
+) -> None:
+    s = _settings()
+    selected = campaign.strip().lower()
+    if selected != "residual-momentum":
+        raise typer.BadParameter(
+            "v0.13.1 preflight currently supports residual-momentum"
+        )
+    payload = CanonicalHistoryManager(s).residual_momentum_preflight()
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("data-quality-blockers")
+def data_quality_blockers() -> None:
+    s = _settings()
+    path = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality/latest.json"
+    )
+    if not path.is_file():
+        raise typer.BadParameter("Run data-quality --deep first")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    rows = [
+        row
+        for row in (raw.get("enhanced") or [])
+        if not bool(row.get("healthy"))
+    ]
+    payload = {
+        "schema_version": "crypto_ai_swing_data_quality_blockers_v2",
+        "blocked_series": len(rows),
+        "rows": rows,
+        "scope": {
+            "source": str(path),
+            "series_evaluated": len(raw.get("enhanced") or []),
+            "semantic_meaning": (
+                "RAW_TIMESTAMP_GRID_BLOCKERS_NOT_PROVIDER_SEMANTIC_"
+                "INTEGRITY_BLOCKERS"
+            ),
+        },
+        "orders_submitted": 0,
+    }
+    console.print_json(json.dumps(payload, default=str))
+
+@app.command("provider-semantic-quality")
+def provider_semantic_quality(
+    markets: str = typer.Option(
+        "",
+        help="Comma list. Empty uses series blocked by the latest deep grid audit.",
+    ),
+    timeframes: str = typer.Option(
+        "",
+        help="Comma list when --markets is explicit.",
+    ),
+) -> None:
+    """Classify raw timestamp gaps using Bitvavo provider semantics."""
+    s = _settings()
+    pairs: list[tuple[str, str]] = []
+
+    selected_markets = [
+        item.strip().upper()
+        for item in markets.split(",")
+        if item.strip()
+    ]
+    selected_timeframes = [
+        item.strip()
+        for item in timeframes.split(",")
+        if item.strip()
+    ]
+
+    if selected_markets:
+        if not selected_timeframes:
+            raise typer.BadParameter(
+                "--timeframes is required when --markets is explicit"
+            )
+        pairs = [
+            (market, timeframe)
+            for timeframe in selected_timeframes
+            for market in selected_markets
+        ]
+    else:
+        latest = (
+            s.project_root
+            / "output/crypto_ai_swing/data_quality/latest.json"
+        )
+        if not latest.is_file():
+            raise typer.BadParameter(
+                "Run data-quality --deep first or pass explicit markets/timeframes"
+            )
+        raw = json.loads(latest.read_text(encoding="utf-8"))
+        for row in raw.get("enhanced") or []:
+            if not bool(row.get("healthy")):
+                pairs.append(
+                    (
+                        str(row.get("market") or "").upper(),
+                        str(row.get("timeframe") or ""),
+                    )
+                )
+
+    pairs = list(dict.fromkeys(pair for pair in pairs if all(pair)))
+    if not pairs:
+        payload = {
+            "schema_version": "crypto_ai_swing_provider_semantics_report_v1",
+            "status": "NO_RAW_GRID_BLOCKERS",
+            "series": [],
+            "summary": aggregate_provider_semantics([]),
+            "orders_submitted": 0,
+        }
+        console.print_json(json.dumps(payload, default=str))
+        return
+
+    bridge = CryptoLibraryBridge(s.crypto_repo_root)
+    auditor = ProviderSemanticAuditor(s)
+    rows: list[dict] = []
+
+    grouped: dict[str, list[str]] = {}
+    for market, timeframe in pairs:
+        grouped.setdefault(timeframe, []).append(market)
+
+    for timeframe, tf_markets in grouped.items():
+        frames = bridge.ohlcv_many(
+            tf_markets,
+            timeframe,
+            persist=False,
+            concurrency=4,
+        )
+        for market in tf_markets:
+            try:
+                row = auditor.audit_series(
+                    market=market,
+                    timeframe=timeframe,
+                    frame=frames[market],
+                )
+            except Exception as exc:  # noqa: BLE001
+                row = {
+                    "market": market,
+                    "timeframe": timeframe,
+                    "status": "AUDIT_ERROR",
+                    "integrity_healthy": False,
+                    "integrity_blockers": [
+                        f"SEMANTIC_AUDIT_{type(exc).__name__.upper()}"
+                    ],
+                    "error": str(exc)[:1000],
+                    "orders_submitted": 0,
+                }
+            rows.append(row)
+
+    summary = aggregate_provider_semantics(rows)
+    payload = {
+        "schema_version": "crypto_ai_swing_provider_semantics_report_v1",
+        "status": (
+            "INTEGRITY_HEALTHY"
+            if summary["integrity_all_healthy"]
+            else "INTEGRITY_BLOCKED"
+        ),
+        "series": rows,
+        "summary": summary,
+        "interpretation": {
+            "confirmed_zero_trade_is_data_corruption": False,
+            "confirmed_zero_trade_is_liquidity_density_signal": True,
+            "recoverable_provider_gap_blocks_integrity": True,
+            "cross_timeframe_inconsistency_blocks_integrity": True,
+        },
+        "orders_generated": 0,
+        "orders_submitted": 0,
+    }
+
+    root = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality/provider_semantics"
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    history = root / f"{stamp}.json"
+    latest = root / "latest.json"
+    text = json.dumps(payload, indent=2, default=str)
+    history.write_text(text, encoding="utf-8")
+    latest.write_text(text, encoding="utf-8")
+    payload["output"] = str(latest)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("provider-semantic-blockers")
+def provider_semantic_blockers() -> None:
+    s = _settings()
+    path = (
+        s.project_root
+        / "output/crypto_ai_swing/data_quality/provider_semantics/latest.json"
+    )
+    if not path.is_file():
+        raise typer.BadParameter("Run provider-semantic-quality first")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    rows = [
+        row
+        for row in raw.get("series") or []
+        if not bool(row.get("integrity_healthy"))
+    ]
+    payload = {
+        "schema_version": "crypto_ai_swing_provider_semantic_blockers_v1",
+        "integrity_blocked_series": len(rows),
+        "rows": rows,
+        "orders_submitted": 0,
+    }
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("native-alpha-tournament")
+def native_alpha_tournament(
+    campaigns: str = typer.Option(
+        ",".join(DEFAULT_CAMPAIGNS),
+        help="Comma-separated native research campaign names.",
+    ),
+) -> None:
+    """Run native Sjagil/crypto alpha families without synthetic ranking."""
+    s = _settings()
+    selected = [
+        item.strip()
+        for item in campaigns.split(",")
+        if item.strip()
+    ]
+    payload = run_native_alpha_tournament(
+        crypto_repo_root=s.crypto_repo_root,
+        campaigns=selected,
+    )
+    output = write_tournament(s.project_root, payload)
+    payload["output"] = str(output)
+    console.print_json(json.dumps(payload, default=str))
 
 if __name__ == "__main__":
     app()
