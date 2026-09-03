@@ -49,6 +49,9 @@ def test_multi_alpha_dependency_reports_missing_absolute_momentum(tmp_path):
 
 
 def test_reference_doctor_detects_unregistered_local_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("CRYPTO_SWING_REFERENCE_VENV_ROOT", raising=False)
+    monkeypatch.delenv("CRYPTO_SWING_REFERENCE_REPO_ROOT", raising=False)
+
     config = {
         "references": {
             "nautilus_trader": {
@@ -76,6 +79,7 @@ def test_reference_doctor_detects_unregistered_local_env(tmp_path, monkeypatch):
         "_probe_python",
         lambda path, module: {
             "healthy": True,
+            "process_healthy": True,
             "python": "3.12.0",
             "executable": str(path),
             "module": module,
@@ -84,7 +88,7 @@ def test_reference_doctor_detects_unregistered_local_env(tmp_path, monkeypatch):
     )
 
     payload = reference_runtime.reference_environment_status(tmp_path)
-    assert payload["references"][0]["status"] == "READY_ISOLATED"
+    assert payload["references"][0]["status"] == "READY_SOURCE_AND_PACKAGE_ISOLATED"
     assert payload["unregistered_envs"] == ["stocks"]
     assert payload["orders_submitted"] == 0
 
