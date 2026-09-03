@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import inspect
 import json
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
-
 
 NATIVE_FOUNDATION_INTERFACES: dict[str, tuple[str, ...]] = {
     "core.live_universe": ("candle_health",),
@@ -109,7 +109,7 @@ class NativeFoundationBridge:
                         "file": str(getattr(module, "__file__", "") or ""),
                     }
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
             rows.append(row)
 
@@ -129,7 +129,7 @@ class NativeFoundationBridge:
         module = self.crypto.import_module("core.live_universe")
         fn = getattr(module, "candle_health", None)
         if not callable(fn):
-            raise RuntimeError("core.live_universe.candle_health unavailable")
+            raise RuntimeError("core.live_universe.candle_health unavailable")  # noqa: TRY004
 
         normalized_timeframes = tuple(
             "1W" if str(tf).lower() == "1w" else str(tf)
@@ -142,7 +142,7 @@ class NativeFoundationBridge:
             write_artifact=False,
         )
         if not isinstance(payload, dict):
-            raise RuntimeError("native candle_health returned non-dict")
+            raise RuntimeError("native candle_health returned non-dict")  # noqa: TRY004
 
         return {
             **payload,
@@ -153,9 +153,9 @@ class NativeFoundationBridge:
 
     def pit_feature_store_certification(self) -> dict[str, Any]:
         module = self.crypto.import_module("data.feature_store")
-        strict_markets = tuple(getattr(module, "STRICT_PORTFOLIO_MARKETS"))
-        policy_cls = getattr(module, "FeatureStorePolicy")
-        build = getattr(module, "build_feature_tensors")
+        strict_markets = tuple(module.STRICT_PORTFOLIO_MARKETS)
+        policy_cls = module.FeatureStorePolicy
+        build = module.build_feature_tensors
 
         frames = {
             market: self.crypto.ohlcv(market, "1d", persist=False)
@@ -172,8 +172,8 @@ class NativeFoundationBridge:
             "dataset_id": manifest.get("dataset_id"),
             "causality": manifest.get("causality", {}),
             "frequency": manifest.get("frequency"),
-            "feature_rows": int(getattr(bundle, "feature_mask").sum()),
-            "target_rows": int(getattr(bundle, "target_mask").sum()),
+            "feature_rows": int(bundle.feature_mask.sum()),
+            "target_rows": int(bundle.target_mask.sum()),
             "feature_names": list(manifest.get("feature_names") or []),
             "target_names": list(manifest.get("target_names") or []),
             "manifest": manifest,
@@ -199,7 +199,7 @@ class NativeFoundationBridge:
                 row["file"] = str(getattr(module, "__file__", "") or "")
                 if callable(fn):
                     row["signature"] = str(inspect.signature(fn))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 row["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
             campaigns.append(row)
 
@@ -244,6 +244,119 @@ class NativeFoundationBridge:
         return 0
 
     @staticmethod
+    def _forward_evidence_digest(
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        raw = payload.get("forward_summaries")
+        if not isinstance(raw, dict) or not raw:
+            return None
+
+        rows = {
+            str(name): dict(value)
+            for name, value in raw.items()
+            if isinstance(value, dict)
+        }
+        if not rows:
+            return None
+
+        def numeric(value: Any) -> float | None:
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                return None
+            return result
+
+        def integer(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        statuses = sorted(
+            {
+                str(row.get("status"))
+                for row in rows.values()
+                if row.get("status") is not None
+            }
+        )
+        closed = [
+            integer(row.get("closed_daily_observations"))
+            for row in rows.values()
+        ]
+        required_closed = [
+            integer(row.get("required_closed_daily_observations"))
+            for row in rows.values()
+        ]
+        rebalances = [
+            integer(row.get("forward_rebalances"))
+            for row in rows.values()
+        ]
+        required_rebalances = [
+            integer(row.get("required_forward_rebalances"))
+            for row in rows.values()
+        ]
+        high_volatility = []
+        for row in rows.values():
+            regime = dict(row.get("regime_coverage") or {})
+            counts = dict(regime.get("counts") or {})
+            volatility = dict(counts.get("volatility") or {})
+            high_volatility.append(integer(volatility.get("HIGH")))
+
+        returns = [
+            (name, numeric(row.get("forward_net_return")))
+            for name, row in rows.items()
+        ]
+        returns = [
+            (name, value)
+            for name, value in returns
+            if value is not None
+        ]
+        best = max(returns, key=lambda item: item[1]) if returns else None
+        worst = min(returns, key=lambda item: item[1]) if returns else None
+        formal_flags = [
+            bool(row.get("formal_performance_gates_evaluated"))
+            for row in rows.values()
+        ]
+
+        return {
+            "candidate_count": len(rows),
+            "statuses": statuses,
+            "maximum_closed_daily_observations": max(closed, default=0),
+            "required_closed_daily_observations": max(
+                required_closed,
+                default=0,
+            ),
+            "maximum_forward_rebalances": max(rebalances, default=0),
+            "required_forward_rebalances": max(
+                required_rebalances,
+                default=0,
+            ),
+            "maximum_high_volatility_observations": max(
+                high_volatility,
+                default=0,
+            ),
+            "formal_performance_gates_evaluated_for_any": any(formal_flags),
+            "formal_performance_gates_evaluated_for_all": all(formal_flags),
+            "best_diagnostic_forward": (
+                {
+                    "candidate": best[0],
+                    "net_return": best[1],
+                }
+                if best
+                else None
+            ),
+            "worst_diagnostic_forward": (
+                {
+                    "candidate": worst[0],
+                    "net_return": worst[1],
+                }
+                if worst
+                else None
+            ),
+            "diagnostic_forward_returns_authorize_promotion": False,
+        }
+
+    @staticmethod
     def _compact_campaign(payload: dict[str, Any]) -> dict[str, Any]:
         selected = NativeFoundationBridge._first_value(
             payload,
@@ -251,16 +364,22 @@ class NativeFoundationBridge:
                 "selected_candidate",
                 "selected_strategy",
                 "primary_strategy",
+                "primary_strategy_id",
+                "primary_policy_name",
+                "primary_strategy_name",
                 "champion",
             ),
         )
         candidate_count = NativeFoundationBridge._first_value(
             payload,
             (
+                "generated_trial_count",
                 "candidate_count",
+                "registered_unique_trials",
                 "trial_count",
                 "total_trials",
                 "strategy_count",
+                "formal_risk_budget_paths",
             ),
         )
         if candidate_count is None:
@@ -268,6 +387,24 @@ class NativeFoundationBridge:
                 payload,
                 ("candidates", "trials", "strategies", "results"),
             )
+
+        paper_count = NativeFoundationBridge._first_value(
+            payload,
+            ("paper_candidates", "paper_candidate_count"),
+        )
+        try:
+            paper_count_int = int(paper_count or 0)
+        except (TypeError, ValueError):
+            paper_count_int = 0
+
+        paper_permitted = bool(
+            NativeFoundationBridge._first_value(
+                payload,
+                ("paper_candidate_permitted",),
+            )
+            or paper_count_int > 0
+        )
+
         return {
             "campaign": payload.get("campaign"),
             "status": payload.get("status"),
@@ -275,9 +412,24 @@ class NativeFoundationBridge:
                 payload.get("promotion_state")
                 or payload.get("status")
             ),
-            "strategy_family": payload.get("strategy_family"),
+            "strategy_family": NativeFoundationBridge._first_value(
+                payload,
+                ("strategy_family",),
+            ),
             "selected_candidate": selected,
             "candidate_count": int(candidate_count or 0),
+            "registered_unique_trials": NativeFoundationBridge._first_value(
+                payload,
+                ("registered_unique_trials",),
+            ),
+            "total_known_trials": NativeFoundationBridge._first_value(
+                payload,
+                ("total_known_trials",),
+            ),
+            "pbo": NativeFoundationBridge._first_value(
+                payload,
+                ("pbo", "inherited_component_pbo"),
+            ),
             "economic_pass": NativeFoundationBridge._first_value(
                 payload,
                 ("economic_pass",),
@@ -286,12 +438,20 @@ class NativeFoundationBridge:
                 payload,
                 ("statistical_pass",),
             ),
-            "paper_candidate_permitted": bool(
+            "research_pass": NativeFoundationBridge._first_value(
+                payload,
+                ("research_pass",),
+            ),
+            "primary_positive_research_lead": (
                 NativeFoundationBridge._first_value(
                     payload,
-                    ("paper_candidate_permitted",),
+                    ("primary_positive_research_lead",),
                 )
-                or False
+            ),
+            "paper_candidate_count": paper_count_int,
+            "paper_candidate_permitted": paper_permitted,
+            "forward_evidence": NativeFoundationBridge._forward_evidence_digest(
+                payload
             ),
             "live_ready": bool(
                 NativeFoundationBridge._first_value(
@@ -301,6 +461,7 @@ class NativeFoundationBridge:
                 or False
             ),
             "automatic_live_promotion": False,
+            "orders_generated": int(payload.get("orders_generated") or 0),
             "orders_submitted": int(payload.get("orders_submitted") or 0),
         }
 
@@ -314,13 +475,13 @@ class NativeFoundationBridge:
         module = self.crypto.import_module(module_name)
         fn = getattr(module, function_name, None)
         if not callable(fn):
-            raise RuntimeError(
+            raise RuntimeError(  # noqa: TRY004
                 f"native campaign unavailable: {module_name}.{function_name}"
             )
 
         raw = fn(self.crypto.settings())
         if not isinstance(raw, dict):
-            raise RuntimeError("native campaign returned non-dict")
+            raise RuntimeError("native campaign returned non-dict")  # noqa: TRY004
 
         return {
             "schema_version": "crypto_ai_swing_native_alpha_run_v1",

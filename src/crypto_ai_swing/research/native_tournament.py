@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from crypto_ai_swing.bridge.native_foundation import NativeFoundationBridge
+from crypto_ai_swing.research.native_dependencies import (
+    inspect_native_campaign_dependencies,
+)
 
 DEFAULT_CAMPAIGNS = (
     "residual-momentum",
@@ -17,20 +20,43 @@ DEFAULT_CAMPAIGNS = (
 )
 
 
+def _forward_collecting(summary: dict[str, Any]) -> bool:
+    forward = dict(summary.get("forward_evidence") or {})
+    statuses = {
+        str(value).upper()
+        for value in (forward.get("statuses") or [])
+        if value is not None
+    }
+    return "COLLECTING_FORWARD_DATA" in statuses
+
+
 def _classification(payload: dict[str, Any]) -> str:
     if payload.get("status") == "BLOCKED":
         return "BLOCKED_INFRASTRUCTURE"
+
     summary = dict(payload.get("summary") or {})
     if bool(summary.get("live_ready")):
         return "LIVE_READY_NATIVE_EVIDENCE"
     if bool(summary.get("paper_candidate_permitted")):
         return "PAPER_CANDIDATE_NATIVE_EVIDENCE"
-    if (
-        summary.get("statistical_pass") is True
-        and summary.get("economic_pass") is True
-    ):
+    if summary.get("research_pass") is True:
         return "RESEARCH_EVIDENCE_PASSED"
-    return "REJECTED_OR_COLLECTING_EVIDENCE"
+
+    economic = summary.get("economic_pass")
+    statistical = summary.get("statistical_pass")
+    collecting = _forward_collecting(summary)
+
+    if economic is True and statistical is True:
+        return (
+            "FORWARD_EVIDENCE_COLLECTING"
+            if collecting
+            else "HISTORICAL_EVIDENCE_PASSED"
+        )
+    if collecting and (economic is False or statistical is False):
+        return "HISTORICAL_GATES_FAILED_FORWARD_COLLECTING"
+    if collecting:
+        return "FORWARD_EVIDENCE_COLLECTING_UNQUALIFIED"
+    return "REJECTED_NATIVE_EVIDENCE"
 
 
 def run_native_alpha_tournament(
@@ -44,6 +70,42 @@ def run_native_alpha_tournament(
         selected = str(campaign).strip().lower()
         if not selected:
             continue
+
+        try:
+            preflight = inspect_native_campaign_dependencies(
+                crypto_repo_root=crypto_repo_root,
+                campaign=selected,
+            )
+        except Exception as exc:  # noqa: BLE001
+            preflight = {
+                "schema_version": "crypto_ai_swing_native_campaign_dependencies_v1",
+                "campaign": selected,
+                "ready": False,
+                "classification": "BLOCKED_DEPENDENCY_INSPECTION",
+                "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                "repair_commands": [],
+                "orders_generated": 0,
+                "orders_submitted": 0,
+            }
+
+        if not bool(preflight.get("ready")):
+            rows.append(
+                {
+                    "campaign": selected,
+                    "classification": (
+                        "BLOCKED_PREREQUISITE_EVIDENCE"
+                        if preflight.get("classification")
+                        == "BLOCKED_PREREQUISITE_EVIDENCE"
+                        else "BLOCKED_INFRASTRUCTURE"
+                    ),
+                    "summary": None,
+                    "source": None,
+                    "dependency_preflight": preflight,
+                    "error": preflight.get("error"),
+                }
+            )
+            continue
+
         try:
             payload = bridge.run_alpha_campaign(selected)
             row = {
@@ -51,6 +113,7 @@ def run_native_alpha_tournament(
                 "classification": _classification(payload),
                 "summary": payload.get("summary"),
                 "source": payload.get("source"),
+                "dependency_preflight": preflight,
                 "error": None,
             }
         except Exception as exc:  # noqa: BLE001
@@ -59,40 +122,53 @@ def run_native_alpha_tournament(
                 "classification": "BLOCKED_INFRASTRUCTURE",
                 "summary": None,
                 "source": None,
+                "dependency_preflight": preflight,
                 "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
             }
         rows.append(row)
 
+    classifications = [row["classification"] for row in rows]
     return {
-        "schema_version": "crypto_ai_swing_native_alpha_tournament_v1",
+        "schema_version": "crypto_ai_swing_native_alpha_tournament_v3",
         "generated_at": datetime.now(UTC).isoformat(),
         "campaigns": rows,
         "counts": {
             "total": len(rows),
-            "blocked_infrastructure": sum(
-                row["classification"] == "BLOCKED_INFRASTRUCTURE"
-                for row in rows
+            "blocked_prerequisite_evidence": classifications.count(
+                "BLOCKED_PREREQUISITE_EVIDENCE"
             ),
-            "rejected_or_collecting": sum(
-                row["classification"]
-                == "REJECTED_OR_COLLECTING_EVIDENCE"
-                for row in rows
+            "blocked_infrastructure": classifications.count(
+                "BLOCKED_INFRASTRUCTURE"
             ),
-            "research_evidence_passed": sum(
-                row["classification"] == "RESEARCH_EVIDENCE_PASSED"
-                for row in rows
+            "historical_gates_failed_forward_collecting": classifications.count(
+                "HISTORICAL_GATES_FAILED_FORWARD_COLLECTING"
             ),
-            "paper_candidates": sum(
-                row["classification"]
-                == "PAPER_CANDIDATE_NATIVE_EVIDENCE"
-                for row in rows
+            "forward_evidence_collecting": classifications.count(
+                "FORWARD_EVIDENCE_COLLECTING"
             ),
-            "live_ready": sum(
-                row["classification"] == "LIVE_READY_NATIVE_EVIDENCE"
-                for row in rows
+            "forward_evidence_collecting_unqualified": classifications.count(
+                "FORWARD_EVIDENCE_COLLECTING_UNQUALIFIED"
+            ),
+            "historical_evidence_passed": classifications.count(
+                "HISTORICAL_EVIDENCE_PASSED"
+            ),
+            "rejected_native_evidence": classifications.count(
+                "REJECTED_NATIVE_EVIDENCE"
+            ),
+            "research_evidence_passed": classifications.count(
+                "RESEARCH_EVIDENCE_PASSED"
+            ),
+            "paper_candidates": classifications.count(
+                "PAPER_CANDIDATE_NATIVE_EVIDENCE"
+            ),
+            "live_ready": classifications.count(
+                "LIVE_READY_NATIVE_EVIDENCE"
             ),
         },
         "ranking_policy": "NO_SYNTHETIC_SCORE_USE_NATIVE_EVIDENCE_ONLY",
+        "classification_policy": (
+            "SEPARATE_HISTORICAL_GATES_FROM_FORWARD_DIAGNOSTIC_COLLECTION"
+        ),
         "authority": "RESEARCH_ONLY",
         "live_decision_influence": False,
         "automatic_live_promotion": False,
