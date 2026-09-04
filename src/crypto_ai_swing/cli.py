@@ -1,49 +1,52 @@
 from __future__ import annotations
 
-from pathlib import Path
-from decimal import Decimal
-from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
 import json
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from .settings import Settings
-from .bridge.discovery import write_report
-from .bridge.crypto_library import CryptoLibraryBridge
-from .orchestration.pipeline import SwingPipeline
-from .orchestration.proactive import ProactiveTrader
-from .execution.bitvavo import live_gate_status
-from .nlp.engine import NLPMarketEngine
-from .intelligence.crypto_news import CryptoNewsCollector
-from .research.native import NativeResearchBridge
-from .research.forward import ForwardEvidenceLedger
-from .agents.training import AgentTrainer
-from .agents.runtime import AgentRuntime
 from .agents.rl_training import train_ppo_challenger
-from .execution.crypto_authority import CryptoAuthorityAdapter
-from .orchestration.supervisor import AutonomousSupervisor
-from .universe.runtime import UniverseManager
-from .research.bootstrap import ColdStartResearchRunner
+from .agents.runtime import AgentRuntime
+from .agents.training import AgentTrainer
+from .bridge.crypto_library import CryptoLibraryBridge
+from .bridge.discovery import write_report
 from .bridge.native_foundation import NativeFoundationBridge
-from .data.quality import audit_ohlcv_frame, aggregate_quality
-from .research.patterns import latest_pattern_snapshot
-from .orchestration.control_plane import ModeController
-from .orchestration.health import runtime_health
-from .execution.paper_certification import certify_paper_lifecycle
+from .bridge.reference_provision import provision_references, write_provision_report
 from .data.canonical_history import CanonicalHistoryManager
 from .data.provider_semantics import (
     ProviderSemanticAuditor,
     aggregate_provider_semantics,
 )
+from .data.quality import aggregate_quality, audit_ohlcv_frame
+from .execution.bitvavo import live_gate_status
+from .execution.crypto_authority import CryptoAuthorityAdapter
+from .execution.paper_certification import certify_paper_lifecycle
+from .intelligence.crypto_news import CryptoNewsCollector
+from .nlp.engine import NLPMarketEngine
+from .orchestration.control_plane import ModeController
+from .orchestration.health import runtime_health
+from .orchestration.pipeline import SwingPipeline
+from .orchestration.proactive import ProactiveTrader
+from .orchestration.supervisor import AutonomousSupervisor
+from .research.bootstrap import ColdStartResearchRunner
+from .research.forward import ForwardEvidenceLedger
+from .research.native import NativeResearchBridge
 from .research.native_tournament import (
     DEFAULT_CAMPAIGNS,
     run_native_alpha_tournament,
     write_tournament,
 )
+from .research.patterns import latest_pattern_snapshot
+from .settings import Settings
+from .universe.runtime import UniverseManager
+from .validation.cross_engine import run_cross_engine_validation
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -402,8 +405,8 @@ def smoke(rows: int = 800) -> None:
     )
     result = SwingPipeline(s).run(
         {"BTC-EUR": df},
-        equity_eur=Decimal("10000"),
-        cash_eur=Decimal("10000"),
+        equity_eur=Decimal(10000),
+        cash_eur=Decimal(10000),
     )
     console.print(
         json.dumps(
@@ -720,14 +723,16 @@ def live_canary_preflight() -> None:
         }))
         return
     raw = candidates[0]
-    now = datetime.now(timezone.utc)
-    from crypto_ai_swing.contracts import Authority as A, Side as S, TradeIntent as T
+    now = datetime.now(UTC)
+    from crypto_ai_swing.contracts import Authority as A
+    from crypto_ai_swing.contracts import Side as S
+    from crypto_ai_swing.contracts import TradeIntent as T
     intent = T(
         intent_id=str(raw["intent_id"]),
         created_at=now,
         market=str(raw["market"]),
         side=S.BUY,
-        notional_eur=min(Decimal("10"), Decimal(str(raw["notional_eur"]))),
+        notional_eur=min(Decimal(10), Decimal(str(raw["notional_eur"]))),
         expected_edge_bps=float(raw["expected_edge_bps"]),
         estimated_round_trip_cost_bps=float(raw["estimated_round_trip_cost_bps"]),
         net_edge_bps=float(raw["net_edge_bps"]),
@@ -840,7 +845,7 @@ def data_sync(
                     "market": market,
                     "timeframe": timeframe,
                     "rows": (
-                        int(len(frame))
+                        len(frame)
                         if frame is not None
                         else 0
                     ),
@@ -1231,6 +1236,53 @@ def native_alpha_run(
     console.print_json(
         json.dumps(payload, default=str)
     )
+
+
+@app.command("reference-provision")
+def reference_provision(
+    venv_root: Path = typer.Option(...),
+    repo_root: Path | None = typer.Option(None),
+    apply: bool = typer.Option(False, "--apply/--plan"),
+    name: list[str] = typer.Option(None, "--name"),
+) -> None:
+    s = _settings()
+    payload = provision_references(
+        s.project_root,
+        venv_root=venv_root,
+        repo_root=repo_root,
+        names=list(name or []) or None,
+        apply=apply,
+        include_disabled=False,
+    )
+    out = s.project_root / "output/crypto_ai_swing/references/provision_latest.json"
+    write_provision_report(payload, out)
+    payload["output"] = str(out)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("cross-engine-validate")
+def cross_engine_validate(
+    market: str = typer.Option("BTC-EUR"),
+    timeframe: str = typer.Option("1h"),
+    fast_ema: int = typer.Option(20),
+    slow_ema: int = typer.Option(60),
+    maximum_rows: int = typer.Option(5000),
+    venv_root: Path | None = typer.Option(None),
+    repo_root: Path | None = typer.Option(None),
+) -> None:
+    s = _settings()
+    payload = run_cross_engine_validation(
+        s.project_root,
+        s.crypto_repo_root,
+        market=market,
+        timeframe=timeframe,
+        fast_ema=fast_ema,
+        slow_ema=slow_ema,
+        maximum_rows=maximum_rows,
+        venv_root=venv_root,
+        repo_root=repo_root,
+    )
+    console.print_json(json.dumps(payload, default=str))
 
 
 @app.command("mode-status")
@@ -1768,7 +1820,7 @@ def provider_semantic_quality(
         / "output/crypto_ai_swing/data_quality/provider_semantics"
     )
     root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     history = root / f"{stamp}.json"
     latest = root / "latest.json"
     text = json.dumps(payload, indent=2, default=str)

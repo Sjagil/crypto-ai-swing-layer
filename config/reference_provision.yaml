@@ -1,0 +1,25 @@
+schema: crypto_ai_swing_reference_provision_v1
+defaults:
+  python: python3
+  clone_depth: 1
+  install_timeout_seconds: 1800
+  clone_timeout_seconds: 900
+packages:
+  nautilus_trader:
+    pip: nautilus_trader
+  vectorbt:
+    pip: vectorbt>=0.28,<1
+  optuna:
+    pip: optuna>=4,<5
+  skfolio:
+    pip: skfolio>=0.12,<1
+  stable_baselines3_contrib:
+    pip: sb3-contrib>=2.3,<3
+policy:
+  isolated_envs_only: true
+  reference_processes_are_research_only: true
+  reference_processes_may_not_submit_orders: true
+compatibility:
+  vectorbt:
+  - plotly>=5.22,<6
+  - pyarrow>=15

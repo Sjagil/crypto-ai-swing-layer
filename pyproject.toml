@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-ai-swing-layer"
-version = "0.14.1"
+version = "0.15.1"
 description = "Crypto-only AI swing research, portfolio, shadow and execution-intent layer"
 requires-python = ">=3.11"
 dependencies = [
@@ -47,6 +47,7 @@ research = [
   "optuna>=4,<5",
   "skfolio>=0.12,<1",
   "vectorbt>=0.28,<1",
+  "plotly>=5.22,<6",
   "cvxpy>=1.5,<2",
   "arch>=7,<9"
 ]
