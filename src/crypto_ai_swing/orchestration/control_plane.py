@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.bridge.native_foundation import NativeFoundationBridge
+from crypto_ai_swing.execution.bitvavo import live_gate_status
 from crypto_ai_swing.execution.crypto_authority import (
     CryptoAuthorityAdapter,
 )
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
-
 
 PUBLIC_MODES = ("shadow", "paper", "canary")
 RUNTIME_MODES = {
@@ -165,6 +165,57 @@ class ModeController:
         finally:
             ledger.close()
 
+    def _execution_validation_mode_policy(self) -> dict[str, Any]:
+        proactive = dict(
+            getattr(self.settings, "proactive", {}) or {}
+        )
+        active = dict(proactive.get("active_swing", {}) or {})
+        canary = dict(
+            active.get("execution_validation_canary", {}) or {}
+        )
+
+        blockers: list[str] = []
+        maximum_order = float(canary.get("maximum_order_eur", 10.0))
+
+        if not bool(active.get("enabled", True)):
+            blockers.append("ACTIVE_SWING_DISABLED")
+        if str(active.get("style", "ACTIVE_SWING")).upper() != "ACTIVE_SWING":
+            blockers.append("ACTIVE_SWING_STYLE_MISMATCH")
+        if bool(active.get("high_frequency_trading", False)):
+            blockers.append("HFT_MODE_FORBIDDEN")
+        if not bool(canary.get("enabled", False)):
+            blockers.append("EXECUTION_VALIDATION_CANARY_DISABLED")
+        if not bool(canary.get("manual_authority_required", True)):
+            blockers.append("MANUAL_AUTHORITY_MUST_REMAIN_REQUIRED")
+        if maximum_order <= 0 or maximum_order > 10.0:
+            blockers.append("EXECUTION_VALIDATION_NOTIONAL_CAP_INVALID")
+        if bool(canary.get("alpha_evidence_authorized", False)):
+            blockers.append("ALPHA_AUTHORITY_FORBIDDEN_FOR_EXECUTION_CANARY")
+        if bool(canary.get("autoscale", False)):
+            blockers.append("AUTOSCALE_FORBIDDEN_FOR_EXECUTION_CANARY")
+
+        return {
+            "schema_version": (
+                "active_swing_execution_validation_mode_policy_v1"
+            ),
+            "eligible": not blockers,
+            "blockers": blockers,
+            "scope": "EXECUTION_VALIDATION_ONLY",
+            "maximum_order_eur": maximum_order,
+            "manual_authority_required": bool(
+                canary.get("manual_authority_required", True)
+            ),
+            "prospective_evidence_required_for_scaling": bool(
+                canary.get(
+                    "prospective_evidence_required_for_scaling",
+                    True,
+                )
+            ),
+            "alpha_evidence_authorized": False,
+            "autoscale": False,
+            "high_frequency_trading": False,
+        }
+
     def preflight(self, target: str) -> dict[str, Any]:
         selected = str(target).lower()
         if selected not in PUBLIC_MODES:
@@ -247,6 +298,10 @@ class ModeController:
 
         readiness: dict[str, Any] | None = None
         authority: dict[str, Any] | None = None
+        execution_validation_policy: dict[str, Any] | None = None
+        canary_scope: str | None = None
+        execution_validation_override = False
+        live_gate_payload: dict[str, Any] | None = None
 
         if selected == "canary":
             try:
@@ -263,16 +318,40 @@ class ModeController:
             prospective_ready = bool(
                 readiness.get("eligible")
             )
+            execution_validation_policy = (
+                self._execution_validation_mode_policy()
+            )
+            execution_validation_ready = bool(
+                execution_validation_policy.get("eligible")
+            )
             checks.append(
                 {
                     "check": "prospective_canary_readiness",
                     "passed": prospective_ready,
                 }
             )
-            if not prospective_ready:
+            checks.append(
+                {
+                    "check": "execution_validation_canary_policy",
+                    "passed": execution_validation_ready,
+                }
+            )
+
+            if prospective_ready:
+                canary_scope = "PROSPECTIVE_CANARY"
+            elif execution_validation_ready:
+                canary_scope = "EXECUTION_VALIDATION_ONLY"
+                execution_validation_override = True
+            else:
                 blockers.extend(
                     str(value)
                     for value in readiness.get("blockers") or []
+                )
+                blockers.extend(
+                    str(value)
+                    for value in execution_validation_policy.get(
+                        "blockers", []
+                    )
                 )
 
             try:
@@ -320,6 +399,39 @@ class ModeController:
                     "CANARY_EXECUTION_ENV_NOT_READY"
                 )
 
+            try:
+                gate = live_gate_status(
+                    getattr(self.settings, "execution", {}) or {}
+                )
+                live_gate_payload = {
+                    "ready": gate.ready,
+                    "blockers": list(gate.blockers),
+                }
+            except Exception as exc:
+                live_gate_payload = {
+                    "ready": False,
+                    "blockers": [
+                        "LIVE_GATE_"
+                        + type(exc).__name__.upper()
+                    ],
+                }
+
+            checks.append(
+                {
+                    "check": "swing_layer_live_gate",
+                    "passed": bool(
+                        live_gate_payload.get("ready")
+                    ),
+                }
+            )
+            if not bool(live_gate_payload.get("ready")):
+                blockers.extend(
+                    str(value)
+                    for value in live_gate_payload.get(
+                        "blockers", []
+                    )
+                )
+
         blockers = list(dict.fromkeys(blockers))
         return {
             "schema_version": "crypto_ai_swing_mode_preflight_v1",
@@ -329,6 +441,17 @@ class ModeController:
             "checks": checks,
             "blockers": blockers,
             "prospective_readiness": readiness,
+            "execution_validation_policy": execution_validation_policy,
+            "canary_scope": canary_scope,
+            "execution_validation_canary_override_applied": (
+                execution_validation_override
+            ),
+            "alpha_evidence_authorized": bool(
+                canary_scope == "PROSPECTIVE_CANARY"
+                and readiness
+                and readiness.get("eligible")
+            ),
+            "live_gate": live_gate_payload,
             "native_authority": authority,
             "live_authority_granted_by_mode_controller": False,
             "automatic_live_promotion": False,

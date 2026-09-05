@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_proactive_v4
+schema: crypto_ai_swing_proactive_v5
 markets: []
 universe_source: runtime_top_25
 interval_seconds: 60
@@ -20,11 +20,46 @@ market_data_persist_live: true
 nlp_cache_seconds: 300
 prospective_context_cache_seconds: 300
 
+active_swing:
+  enabled: true
+  style: ACTIVE_SWING
+  high_frequency_trading: false
+  signal_timeframe: 1h
+  execution_timeframe: 15m
+  execution_validation_canary:
+    enabled: true
+    manual_authority_required: true
+    maximum_order_eur: 10.0
+    minimum_signal_score: 0.74
+    minimum_mtf_score: 0.00
+    minimum_orderflow_score: -0.35
+    maximum_spread_bps: 15.0
+    prospective_evidence_required_for_scaling: true
+    alpha_evidence_authorized: false
+    autoscale: false
+
 # 25 markets are screened cheaply on 1h closed bars. Only the strongest
 # candidates plus open positions receive full MTF/orderflow enrichment.
 deep_scan_limit: 8
 screen_spread_quality_scale_bps: 15
 screen_concurrency: 4
+
+
+rally_capture:
+  enabled: true
+  additional_deep_scan_limit: 6
+  minimum_ret_8: 0.015
+  minimum_ret_24: 0.04
+  minimum_trend_component: 0.45
+  minimum_momentum_component: 0.65
+  minimum_rally_score: 0.65
+  maximum_rsi_for_macro_override: 84.0
+  paper_macro_override_enabled: true
+  macro_override_minimum_macro_score: -0.20
+  macro_override_minimum_trend_score: 0.30
+  macro_override_minimum_setup_score: 0.35
+  macro_override_minimum_trigger_score: 0.15
+  macro_override_minimum_execution_score: -0.10
 
 context_gates:
   block_on_prospective_context_block: true

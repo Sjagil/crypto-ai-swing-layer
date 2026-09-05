@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Iterable, Mapping
 import json
 import sqlite3
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-
 CANONICAL_OUTCOME_SCHEMA = "forward_outcome_observed_time_execution_tf_v3"
 LEGACY_OUTCOME_SCHEMA = "forward_outcome_candle_close_v1"
+
+CALIBRATABLE_EDGE_SOURCES = frozenset(
+    {
+        "QUALIFIED_RETURN_MODEL",
+        "PROSPECTIVE_CALIBRATED_EDGE",
+    }
+)
 
 
 class ForwardEvidenceLedger:
@@ -88,6 +95,17 @@ class ForwardEvidenceLedger:
                 ON forward_outcomes_v2(horizon_hours);
             """
         )
+        columns = {
+            str(row[1])
+            for row in self.conn.execute(
+                "PRAGMA table_info(signal_observations)"
+            ).fetchall()
+        }
+        if "edge_source" not in columns:
+            self.conn.execute(
+                "ALTER TABLE signal_observations "
+                "ADD COLUMN edge_source TEXT NOT NULL DEFAULT 'UNKNOWN'"
+            )
         self.conn.commit()
 
     def close(self) -> None:
@@ -116,7 +134,7 @@ class ForwardEvidenceLedger:
         candle_times: dict[str, str],
     ) -> dict[str, Any]:
         generated = str(
-            payload.get("generated_at") or datetime.now(timezone.utc).isoformat()
+            payload.get("generated_at") or datetime.now(UTC).isoformat()
         )
         mode = str(payload.get("mode") or "unknown")
         cycle_id = self._id(generated, mode, ",".join(payload.get("markets", [])))
@@ -144,7 +162,10 @@ class ForwardEvidenceLedger:
             )
             before = self.conn.total_changes
             self.conn.execute(
-                "INSERT OR IGNORE INTO signal_observations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO signal_observations("
+                "observation_id,cycle_id,observed_at,market,candle_ts,"
+                "side,score,edge_bps,blocked,blockers,context,edge_source"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     observation_id,
                     cycle_id,
@@ -161,6 +182,7 @@ class ForwardEvidenceLedger:
                         sort_keys=True,
                         default=str,
                     ),
+                    str(signal.get("edge_source") or "UNKNOWN"),
                 ),
             )
             inserted += int(self.conn.total_changes > before)
@@ -265,7 +287,7 @@ class ForwardEvidenceLedger:
         evaluated = 0
         skipped_unmatured = 0
         skipped_missing_reference = 0
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         for observation_id, market, candle_ts, side, observed_at in observations:
             frame = normalized.get(str(market))
@@ -411,7 +433,8 @@ class ForwardEvidenceLedger:
         return self.conn.execute(
             """
             SELECT o.horizon_hours, s.side, s.blocked, s.edge_bps,
-                   o.return_bps, s.market, s.observed_at, o.mfe_bps, o.mae_bps
+                   o.return_bps, s.market, s.observed_at, o.mfe_bps, o.mae_bps,
+                   s.edge_source
             FROM forward_outcomes_v2 o
             JOIN signal_observations s ON s.observation_id=o.observation_id
             ORDER BY o.horizon_hours, s.observed_at, s.observation_id
@@ -434,12 +457,22 @@ class ForwardEvidenceLedger:
                 "blocked_buy": self._summary_statistics(blocked_buy),
                 "hold": self._summary_statistics(hold),
             }
-            if unblocked_buy:
+            edge_calibration_buy = [
+                row
+                for row in unblocked_buy
+                if str(row[9]).upper() in CALIBRATABLE_EDGE_SOURCES
+            ]
+            calibration[
+                "unblocked_buy_edge_calibration_eligible_observations"
+            ] = len(edge_calibration_buy)
+            if edge_calibration_buy:
                 predicted = np.asarray(
-                    [float(row[3]) for row in unblocked_buy], dtype=float
+                    [float(row[3]) for row in edge_calibration_buy],
+                    dtype=float,
                 )
                 realized = np.asarray(
-                    [float(row[4]) for row in unblocked_buy], dtype=float
+                    [float(row[4]) for row in edge_calibration_buy],
+                    dtype=float,
                 )
                 error = realized - predicted
                 std = (
@@ -569,9 +602,20 @@ class ForwardEvidenceLedger:
             status = "NEGATIVE_PROSPECTIVE_EVIDENCE"
 
         calibration = None
-        if rows:
-            predicted = np.asarray([float(row[3]) for row in rows], dtype=float)
-            realized = np.asarray([float(row[4]) for row in rows], dtype=float)
+        edge_calibration_rows = [
+            row
+            for row in rows
+            if str(row[9]).upper() in CALIBRATABLE_EDGE_SOURCES
+        ]
+        if edge_calibration_rows:
+            predicted = np.asarray(
+                [float(row[3]) for row in edge_calibration_rows],
+                dtype=float,
+            )
+            realized = np.asarray(
+                [float(row[4]) for row in edge_calibration_rows],
+                dtype=float,
+            )
             error = realized - predicted
             std = float(realized.std(ddof=1)) if len(realized) >= 2 else None
             se = std / float(np.sqrt(len(realized))) if std is not None else None
@@ -586,7 +630,7 @@ class ForwardEvidenceLedger:
             }
 
         return {
-            "schema_version": "prospective_canary_readiness_v1",
+            "schema_version": "prospective_canary_readiness_v2",
             "status": status,
             "eligible": not blockers,
             "primary_horizon_hours": horizon,
@@ -600,6 +644,9 @@ class ForwardEvidenceLedger:
                 "minimum_positive_return_rate": float(minimum_positive_return_rate),
             },
             "calibration": calibration,
+            "edge_calibration_eligible_observations": len(
+                edge_calibration_rows
+            ),
             "blockers": blockers,
             "authority": "CANARY_ELIGIBILITY_ONLY",
             "automatic_live_promotion": False,

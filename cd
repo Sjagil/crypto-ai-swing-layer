@@ -1,0 +1,123 @@
+{
+  "schema_version": "crypto_ai_swing_mode_preflight_v1",
+  "target": "canary",
+  "runtime_mode": "live",
+  "ready": false,
+  "checks": [
+    {
+      "check": "crypto_repo_exists",
+      "passed": true,
+      "value": "/Users/ayoubalhari/Downloads/crypto"
+    },
+    {
+      "check": "crypto_library_ready",
+      "passed": true
+    },
+    {
+      "check": "native_foundation_ready",
+      "passed": true
+    },
+    {
+      "check": "prospective_canary_readiness",
+      "passed": false
+    },
+    {
+      "check": "execution_validation_canary_policy",
+      "passed": true
+    },
+    {
+      "check": "native_canary_authority_active",
+      "passed": false
+    },
+    {
+      "check": "explicit_execution_environment",
+      "passed": true
+    },
+    {
+      "check": "swing_layer_live_gate",
+      "passed": true
+    }
+  ],
+  "blockers": [
+    "NATIVE_CANARY_AUTHORITY_NOT_ACTIVE"
+  ],
+  "prospective_readiness": {
+    "schema_version": "prospective_canary_readiness_v2",
+    "status": "COLLECTING",
+    "eligible": false,
+    "primary_horizon_hours": 4,
+    "unblocked_buy": {
+      "observations": 20,
+      "markets": 7,
+      "mean_return_bps": 7.4383670334381495,
+      "median_return_bps": 50.10377045481906,
+      "return_std_bps": 142.55649481512305,
+      "q25_return_bps": -35.87969140549513,
+      "q75_return_bps": 93.3765115754509,
+      "positive_return_rate": 0.7,
+      "mean_mfe_bps": 144.16614015891105,
+      "mean_mae_bps": -125.69758650738376
+    },
+    "observation_span_hours": 5.919034409166666,
+    "requirements": {
+      "minimum_unblocked_buy_outcomes": 30,
+      "minimum_distinct_markets": 5,
+      "minimum_observation_span_hours": 72.0,
+      "minimum_mean_return_bps": 0.0,
+      "minimum_positive_return_rate": 0.5
+    },
+    "calibration": null,
+    "edge_calibration_eligible_observations": 0,
+    "blockers": [
+      "INSUFFICIENT_UNBLOCKED_BUY_OUTCOMES",
+      "INSUFFICIENT_PROSPECTIVE_TIME_SPAN"
+    ],
+    "authority": "CANARY_ELIGIBILITY_ONLY",
+    "automatic_live_promotion": false,
+    "autoscale_authority": false
+  },
+  "execution_validation_policy": {
+    "schema_version": "active_swing_execution_validation_mode_policy_v1",
+    "eligible": true,
+    "blockers": [],
+    "scope": "EXECUTION_VALIDATION_ONLY",
+    "maximum_order_eur": 10.0,
+    "manual_authority_required": true,
+    "prospective_evidence_required_for_scaling": true,
+    "alpha_evidence_authorized": false,
+    "autoscale": false,
+    "high_frequency_trading": false
+  },
+  "canary_scope": "EXECUTION_VALIDATION_ONLY",
+  "execution_validation_canary_override_applied": true,
+  "alpha_evidence_authorized": false,
+  "live_gate": {
+    "ready": true,
+    "blockers": []
+  },
+  "native_authority": {
+    "schema_version": "swing_layer_live_canary_v1",
+    "active": false,
+    "markets": [],
+    "maximum_order_eur": "10",
+    "maximum_total_exposure_eur": "10",
+    "maximum_open_positions": 1,
+    "maximum_new_orders_per_day": 1,
+    "maximum_risk_per_trade_eur": "1",
+    "autoscale": false,
+    "spot_only": true,
+    "margin": false,
+    "leverage": false,
+    "shorting": false,
+    "withdrawals": false,
+    "approval_phrase_stored": false,
+    "execution_environment_ready": true,
+    "state_status": "RECONCILIATION_REQUIRED",
+    "managed_positions": 0,
+    "orders_generated": 0,
+    "orders_submitted": 0
+  },
+  "live_authority_granted_by_mode_controller": false,
+  "automatic_live_promotion": false,
+  "orders_submitted": 0
+}

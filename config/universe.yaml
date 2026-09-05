@@ -37,6 +37,7 @@ hard_filters:
 
 anti_hype:
   maximum_24h_return: 0.35
+  hard_exclude_above_threshold: false
   maximum_volume_ratio: 5.0
   penalize_new_listing_days: 30
 

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
-
 
 REUSED_NATIVE_INTERFACES = {
     "utils.common": ("atomic_write_json", "append_jsonl", "utc_iso", "utc_now"),
@@ -16,6 +16,7 @@ REUSED_NATIVE_INTERFACES = {
         "calculate_position_size_from_stop_fraction",
     ),
     "core.live_asset_preflight": ("live_account_health",),
+    "core.economics": ("CanonicalCostModel",),
 }
 
 
@@ -56,6 +57,7 @@ class NativeOperationsBridge:
                 "duplicate_correlation_engine": False,
                 "duplicate_position_sizing_math": False,
                 "duplicate_live_account_truth": False,
+                "duplicate_transaction_cost_model": False,
             },
         }
 
@@ -124,6 +126,19 @@ class NativeOperationsBridge:
             block_new_entries=block_new_entries,
             kill_switch=kill_switch,
         )
+
+    def canonical_cost_inputs(self) -> dict[str, Any]:
+        """Read the versioned cost baseline from canonical Sjagil/crypto."""
+        module = self.crypto.import_module("core.economics")
+        model = module.CanonicalCostModel.from_settings(self.crypto.settings())
+        return {
+            "cost_model_version": str(model.cost_model_version),
+            "maker_fee_bps": float(model.maker_fee_fraction) * 10_000.0,
+            "taker_fee_bps": float(model.taker_fee_fraction) * 10_000.0,
+            "spread_bps": float(model.spread_bps),
+            "slippage_bps": float(model.slippage_bps),
+            "calibration_status": str(model.calibration_status),
+        }
 
     def native_interface(self, module_name: str, name: str):
         module = self.crypto.import_module(module_name)

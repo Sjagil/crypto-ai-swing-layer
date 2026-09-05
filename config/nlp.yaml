@@ -11,6 +11,7 @@ direct_asset_weight: 1.0
 btc_cross_asset_weight: 0.20
 macro_weight: 0.25
 generic_weight: 0.10
+no_direct_asset_confidence_cap: 0.55
 rss_urls: []
 asset_aliases:
   BTC: [bitcoin, btc]

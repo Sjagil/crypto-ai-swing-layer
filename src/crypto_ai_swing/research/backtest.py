@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from .metrics import max_drawdown, trade_metrics, probabilistic_sharpe_ratio

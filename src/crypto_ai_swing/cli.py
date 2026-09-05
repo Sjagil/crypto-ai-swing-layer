@@ -713,11 +713,18 @@ def live_canary_preflight() -> None:
         dict(x.get("intent") or {})
         for x in report.get("executions") or []
         if str((x.get("intent") or {}).get("side") or "").upper() == "BUY"
+        and str(
+            ((x.get("intent") or {}).get("metadata") or {}).get(
+                "edge_source"
+            )
+            or ""
+        ).upper()
+        in {"QUALIFIED_RETURN_MODEL", "PROSPECTIVE_CALIBRATED_EDGE"}
     ]
     if not candidates:
         console.print_json(json.dumps({
             "ready": False,
-            "blockers": ["NO_CURRENT_NATURAL_BUY_INTENT"],
+            "blockers": ["NO_CURRENT_CALIBRATED_BUY_INTENT"],
             "prospective_readiness": readiness,
             "orders_submitted": 0,
         }))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from decimal import Decimal
@@ -102,6 +103,46 @@ def _to_ns(value: Any) -> int | None:
         return int(pd.Timestamp(value).value)
     except (TypeError, ValueError):
         return None
+
+
+def _stable_json_hash(payload) -> str:
+    raw = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _frame_hash(frame: pd.DataFrame) -> str:
+    subset = frame[["open", "high", "low", "close", "volume"]].copy()
+    values = {
+        "index": [str(x) for x in subset.index],
+        "rows": subset.round(12).where(subset.notna(), None).values.tolist(),
+    }
+    return _stable_json_hash(values)
+
+
+def _signal_hash(frame: pd.DataFrame) -> str:
+    entries = frame["entry"].astype(bool).tolist()
+    exits = frame["exit"].astype(bool).tolist()
+    target = []
+    state = False
+    for entry, exit_ in zip(entries, exits, strict=True):
+        if entry:
+            state = True
+        if exit_:
+            state = False
+        target.append(int(state))
+    return _stable_json_hash(
+        {
+            "index": [str(x) for x in frame.index],
+            "target_long": target,
+            "entry": [int(x) for x in entries],
+            "exit": [int(x) for x in exits],
+        }
+    )
 
 
 def _fills_report(engine: BacktestEngine):
@@ -261,23 +302,27 @@ def main() -> int:
         execution_drag_fraction=float(payload["execution_drag_fraction"]),
     )
     observed_fill_timestamps = sorted(ledger["observed_fill_timestamps"])
+    logical_order_timestamps = sorted(set(observed_fill_timestamps))
 
     result = {
         "schema_version": "crypto_ai_swing_cross_engine_worker_v2",
         "engine": "nautilus",
         "status": "COMPLETED",
-        "frame_hash": payload["frame_hash"],
-        "signal_hash": payload["signal_hash"],
+        "frame_hash": _frame_hash(frame),
+        "signal_hash": _signal_hash(frame),
         "expected_orders": len(expected_fill_timestamps),
-        "orders": len(fills) if fills is not None else 0,
-        "fill_schedule_match": observed_fill_timestamps == expected_fill_timestamps,
+        "orders": len(logical_order_timestamps),
+        "fill_events": len(fills) if fills is not None else 0,
+        "fill_schedule_match": logical_order_timestamps == expected_fill_timestamps,
         "expected_fill_timestamps": expected_fill_timestamps,
-        "observed_fill_timestamps": observed_fill_timestamps,
+        "observed_fill_timestamps": logical_order_timestamps,
+        "observed_fill_event_timestamps": observed_fill_timestamps,
         "final_value": ledger["final_value"],
         "total_return": ledger["total_return"],
         "canonical_cash": ledger["cash"],
         "canonical_base_quantity": ledger["base_quantity"],
-        "closed_positions": len(positions) if positions is not None else 0,
+        "position_records": len(positions) if positions is not None else 0,
+        "open_position": abs(float(ledger["base_quantity"])) > 1e-12,
         "account_columns": [str(x) for x in account.columns] if account is not None else [],
         "orders_submitted": 0,
         "authority": "RESEARCH_ONLY",

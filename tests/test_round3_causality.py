@@ -1,4 +1,3 @@
-from datetime import timezone
 import pandas as pd
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 import json
-import os
 import subprocess
 
 from crypto_ai_swing.contracts import Authority, TradeIntent

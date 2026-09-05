@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,8 @@ class CostEstimate:
     edge_to_cost_ratio: float
     approved: bool
     blockers: tuple[str, ...]
+    cost_model_version: str = "LOCAL_FALLBACK"
+    edge_gate_enforced: bool = True
 
 
 def estimate_cost(
@@ -23,14 +25,28 @@ def estimate_cost(
     participation_rate: float,
     config: dict,
     quote_volume_eur: float | None = None,
+    *,
+    canonical_cost: dict | None = None,
+    enforce_edge_gate: bool = True,
 ) -> CostEstimate:
     costs = config.get("costs", {})
     gate = config.get("edge_gate", {})
     liquidity = config.get("liquidity", {})
     blockers: list[str] = []
 
-    fee = float(costs.get("fee_bps_per_side", 25.0))
-    base_slip = float(costs.get("base_slippage_bps", 2.0))
+    canonical = dict(canonical_cost or {})
+    fee = float(
+        canonical.get(
+            "taker_fee_bps",
+            costs.get("fee_bps_per_side", 25.0),
+        )
+    )
+    base_slip = float(
+        canonical.get(
+            "slippage_bps",
+            costs.get("base_slippage_bps", 2.0),
+        )
+    )
     vol_coeff = float(costs.get("volatility_slippage_coefficient", 0.08))
     part_coeff = float(costs.get("participation_coefficient", 12.0))
     max_slip = float(costs.get("maximum_slippage_bps", 150.0))
@@ -53,10 +69,11 @@ def estimate_cost(
         and quote_volume_eur < float(liquidity.get("minimum_24h_quote_volume_eur", 0.0))
     ):
         blockers.append("MIN_24H_QUOTE_VOLUME")
-    if net < float(gate.get("minimum_net_edge_bps", 8.0)):
-        blockers.append("NET_EDGE")
-    if ratio < float(gate.get("minimum_edge_to_cost_ratio", 1.5)):
-        blockers.append("EDGE_COST_RATIO")
+    if enforce_edge_gate:
+        if net < float(gate.get("minimum_net_edge_bps", 8.0)):
+            blockers.append("NET_EDGE")
+        if ratio < float(gate.get("minimum_edge_to_cost_ratio", 1.5)):
+            blockers.append("EDGE_COST_RATIO")
 
     return CostEstimate(
         fee_bps=fee,
@@ -67,4 +84,8 @@ def estimate_cost(
         edge_to_cost_ratio=ratio,
         approved=not blockers,
         blockers=tuple(blockers),
+        cost_model_version=str(
+            canonical.get("cost_model_version", "LOCAL_FALLBACK")
+        ),
+        edge_gate_enforced=bool(enforce_edge_gate),
     )

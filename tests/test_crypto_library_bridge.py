@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 

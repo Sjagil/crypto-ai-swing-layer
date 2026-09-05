@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
 import pandas as pd
 
+from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.contracts import Authority, TradeIntent
 from crypto_ai_swing.data.features import build_features
-from crypto_ai_swing.strategies.swing import build_signal
-from crypto_ai_swing.portfolio.allocator import allocate
+from crypto_ai_swing.execution.active_swing_canary import (
+    evaluate_execution_validation_canary,
+)
 from crypto_ai_swing.execution.costs import estimate_cost
 from crypto_ai_swing.execution.shadow import ShadowLedger
-from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
+from crypto_ai_swing.portfolio.allocator import allocate
+from crypto_ai_swing.strategies.swing import build_signal
 
 
 @dataclass
@@ -24,15 +28,22 @@ class PipelineResult:
 class SwingPipeline:
     def __init__(self, settings):
         self.settings = settings
-        self.native = NativeOperationsBridge(settings.crypto_repo_root, project_root=settings.project_root)
+        self.native = NativeOperationsBridge(
+            settings.crypto_repo_root,
+            project_root=settings.project_root,
+        )
+        try:
+            self.canonical_cost = self.native.canonical_cost_inputs()
+        except Exception:
+            self.canonical_cost = {}
 
     def run(
         self,
         frames: dict[str, pd.DataFrame],
-        equity_eur: Decimal = Decimal("1000"),
-        cash_eur: Decimal = Decimal("1000"),
-        exposure_eur: Decimal = Decimal("0"),
-        open_risk_eur: Decimal = Decimal("0"),
+        equity_eur: Decimal = Decimal(1000),
+        cash_eur: Decimal = Decimal(1000),
+        exposure_eur: Decimal = Decimal(0),
+        open_risk_eur: Decimal = Decimal(0),
         spread_bps: dict[str, float] | None = None,
         market_context: dict[str, dict] | None = None,
         authority: Authority = Authority.SHADOW,
@@ -113,8 +124,39 @@ class SwingPipeline:
                         {"market": signal.market, "blockers": blockers}
                     )
                 continue
-            if authority is Authority.LIVE and signal.edge_source == "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY":
-                blocked.append({"market": signal.market, "blockers": ["UNCALIBRATED_EXPECTED_EDGE_SOURCE"]})
+            uncalibrated_edge = (
+                signal.edge_source == "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY"
+            )
+            context = market_context.get(signal.market, {})
+            execution_validation_canary = (
+                evaluate_execution_validation_canary(
+                    authority=authority,
+                    signal=signal,
+                    context=context,
+                    proactive=self.settings.proactive,
+                )
+            )
+            canary_allowed = bool(
+                execution_validation_canary.get("allowed")
+            )
+            if (
+                authority is Authority.LIVE
+                and uncalibrated_edge
+                and not canary_allowed
+            ):
+                blockers = ["UNCALIBRATED_EXPECTED_EDGE_SOURCE"]
+                blockers.extend(
+                    str(value)
+                    for value in execution_validation_canary.get(
+                        "blockers", []
+                    )
+                )
+                blocked.append(
+                    {
+                        "market": signal.market,
+                        "blockers": sorted(set(blockers)),
+                    }
+                )
                 continue
             if not risk.approved:
                 blocked.append(
@@ -126,6 +168,18 @@ class SwingPipeline:
                 continue
             order_notional = risk.order_notional_eur
             native_sizing = None
+            if canary_allowed:
+                maximum_canary_notional = Decimal(
+                    str(
+                        execution_validation_canary.get(
+                            "maximum_order_eur", "10"
+                        )
+                    )
+                )
+                order_notional = min(
+                    order_notional,
+                    maximum_canary_notional,
+                )
             price = float(signal.features.get("price", 0.0) or 0.0)
             if price > 0 and equity_eur > 0:
                 try:
@@ -148,6 +202,17 @@ class SwingPipeline:
                 signal.features.get("quote_volume_24h", 1_000_000.0)
             )
             participation = float(order_notional) / max(1.0, quote_volume)
+            paper_evidence_cfg = dict(
+                exec_cfg.get("paper_evidence", {}) or {}
+            )
+            evidence_only_edge = bool(
+                uncalibrated_edge
+                and authority is not Authority.LIVE
+                and paper_evidence_cfg.get(
+                    "allow_uncalibrated_edge_source",
+                    True,
+                )
+            )
             cost = estimate_cost(
                 signal.expected_edge_bps,
                 spread_bps.get(signal.market, 10.0),
@@ -155,7 +220,26 @@ class SwingPipeline:
                 participation,
                 exec_cfg,
                 quote_volume_eur=quote_volume,
+                canonical_cost=self.canonical_cost,
+                enforce_edge_gate=not evidence_only_edge,
             )
+            if (
+                evidence_only_edge
+                and cost.round_trip_bps
+                > float(
+                    paper_evidence_cfg.get(
+                        "maximum_round_trip_cost_bps",
+                        120.0,
+                    )
+                )
+            ):
+                blocked.append(
+                    {
+                        "market": signal.market,
+                        "blockers": ["PAPER_EVIDENCE_COST_TOO_HIGH"],
+                    }
+                )
+                continue
             if not cost.approved:
                 blocked.append(
                     {
@@ -165,7 +249,7 @@ class SwingPipeline:
                 )
                 continue
 
-            created = datetime.now(timezone.utc)
+            created = datetime.now(UTC)
             context = market_context.get(signal.market, {})
             intent = TradeIntent.new(
                 created_at=created,
@@ -185,9 +269,29 @@ class SwingPipeline:
                     "signal_score": signal.score,
                     "signal_confidence": signal.confidence,
                     "edge_source": signal.edge_source,
+                    "paper_evidence_only": evidence_only_edge,
+                    "cost_model_version": cost.cost_model_version,
+                    "cost_edge_gate_enforced": cost.edge_gate_enforced,
+                    "cost_breakdown": {
+                        "fee_bps_per_side": cost.fee_bps,
+                        "spread_bps": cost.spread_bps,
+                        "slippage_bps_per_side": cost.slippage_bps,
+                        "round_trip_bps": cost.round_trip_bps,
+                        "edge_to_cost_ratio": cost.edge_to_cost_ratio,
+                    },
                     "native_position_sizing": (native_sizing.to_dict() if native_sizing is not None else None),
                     "portfolio_heat_after": risk.portfolio_heat_after,
                     "crypto_repo_context": context,
+                    "execution_validation_canary": canary_allowed,
+                    "execution_validation_canary_policy": (
+                        execution_validation_canary
+                        if canary_allowed
+                        else None
+                    ),
+                    "economic_edge_unproven": bool(canary_allowed),
+                    "alpha_evidence_authorized": False,
+                    "automatic_live_promotion": False,
+                    "autoscale_authorized": False,
                 },
             )
             intents.append(intent)

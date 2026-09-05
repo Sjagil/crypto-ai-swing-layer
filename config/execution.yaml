@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_execution_v3
+schema: crypto_ai_swing_execution_v4
 
 authority:
   default_mode: shadow
@@ -19,6 +19,11 @@ edge_gate:
   minimum_edge_to_cost_ratio: 1.50
   round_trip: true
 
+
+paper_evidence:
+  allow_uncalibrated_edge_source: true
+  maximum_round_trip_cost_bps: 120.0
+
 liquidity:
   maximum_participation_rate: 0.05
   minimum_24h_quote_volume_eur: 250000
@@ -28,14 +33,14 @@ liquidity:
 
 execution:
   paper_enabled: true
-  live_enabled: false
+  live_enabled: true
   intent_ttl_seconds: 120
   external_adapter_command: []
 
 execution_adapter:
   mode: crypto_execution_authority
   direct_bitvavo_fallback: false
-  live_submission_enabled: false
+  live_submission_enabled: true
   intent_directory: output/crypto_ai_swing/trade_intents
   command: []
   live_command: []

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -27,20 +27,20 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
-from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
-from crypto_ai_swing.universe.runtime import UniverseManager
 from crypto_ai_swing.agents.calibration import (
     CalibratedClassifier,
     fit_probability_calibrator,
     purged_calibration_selection_split,
 )
+from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.agents.trials import register_trial_family
+from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
     native_model_selection_evidence,
     native_selected_return_evidence,
     probability_diagnostics,
 )
+from crypto_ai_swing.universe.runtime import UniverseManager
 
 
 @dataclass(frozen=True)
@@ -350,9 +350,7 @@ class AgentTrainer:
         )
 
         x_val = validation.loc[:, features]
-        y_val = validation["target_alpha"].astype(int)
         val_realized = validation["target_forward_return"].to_numpy(float)
-        val_markets = validation["market"].astype(str).to_numpy()
         cost_floor = float(minimum_net_move_bps) / 10_000.0
 
         calibration_cfg = dict(
@@ -685,9 +683,9 @@ class AgentTrainer:
         directional_qualified = bool(alpha_qualified or return_qualified)
 
         metrics = {
-            "train_rows": int(len(train)),
-            "validation_rows": int(len(validation)),
-            "test_rows": int(len(test)),
+            "train_rows": len(train),
+            "validation_rows": len(validation),
+            "test_rows": len(test),
             "market_count": len(dataset.markets),
             "alpha_model": winner_name,
             "alpha_probability_threshold": threshold,
@@ -720,8 +718,8 @@ class AgentTrainer:
             "implicit_model_threshold_trials": current_trial_count,
             "global_known_trial_count": trial_ledger["global_known_trial_count"],
             "global_trial_ledger": trial_ledger,
-            "calibration_rows": int(len(calibration_frame)),
-            "selection_rows": int(len(selection_frame)),
+            "calibration_rows": len(calibration_frame),
+            "selection_rows": len(selection_frame),
             "calibration_range": [
                 pd.Timestamp(calibration_frame["feature_time"].min()).isoformat(),
                 pd.Timestamp(calibration_frame["feature_time"].max()).isoformat(),
@@ -760,7 +758,7 @@ class AgentTrainer:
             "automatic_live_promotion": False,
         }
 
-        trained_at = datetime.now(timezone.utc)
+        trained_at = datetime.now(UTC)
         payload = {
             "schema_version": "swing_agent_bundle_v4",
             "status": "SHADOW",
@@ -768,7 +766,7 @@ class AgentTrainer:
             "head_qualifications": head_qualifications,
             "live_decision_influence": False,
             "dataset_id": dataset.dataset_id,
-            "dataset_rows": int(len(dataset.frame)),
+            "dataset_rows": len(dataset.frame),
             "feature_columns": list(features),
             "markets": list(dataset.markets),
             "timeframe": timeframe,

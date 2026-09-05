@@ -1,25 +1,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
 import threading
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from crypto_ai_swing.agents.training import AgentTrainer
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.orchestration.proactive import ProactiveTrader
 from crypto_ai_swing.research.bootstrap import ColdStartResearchRunner
-from crypto_ai_swing.research.native import NativeResearchBridge
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
+from crypto_ai_swing.research.native import NativeResearchBridge
 from crypto_ai_swing.universe.runtime import UniverseManager
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class AutonomousSupervisor:
@@ -71,10 +71,10 @@ class AutonomousSupervisor:
         try:
             previous = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             if previous.tzinfo is None:
-                previous = previous.replace(tzinfo=timezone.utc)
+                previous = previous.replace(tzinfo=UTC)
         except ValueError:
             return True
-        return (_now() - previous.astimezone(timezone.utc)).total_seconds() >= every
+        return (_now() - previous.astimezone(UTC)).total_seconds() >= every
 
     def _atomic_write(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +349,22 @@ class AutonomousSupervisor:
                 self.run_once(one_shot=False)
             except KeyboardInterrupt:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                out = (
+                    self.settings.project_root
+                    / "output/crypto_ai_swing/supervisor/runtime_errors.jsonl"
+                )
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with out.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "at": _now().isoformat(),
+                                "error": type(exc).__name__,
+                                "detail": str(exc)[:1000],
+                                "mode": self.mode,
+                            }
+                        )
+                        + "\n"
+                    )
             time.sleep(max(1.0, interval - (time.time() - started)))

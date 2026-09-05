@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import math
-from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.data.features import build_features
-
 
 STABLECOIN_BASES = {
     "USDT", "USDC", "DAI", "EURC", "TUSD", "FDUSD", "PYUSD", "USDE",
@@ -81,6 +80,9 @@ class UniverseManager:
             raise ValueError("preferred spread cannot exceed hard maximum spread")
         self.maximum_positive_return_24h = float(
             anti_hype.get("maximum_24h_return", 0.35)
+        )
+        self.anti_hype_hard_exclude = bool(
+            anti_hype.get("hard_exclude_above_threshold", False)
         )
         self.core_markets = tuple(
             str(x).upper()
@@ -184,8 +186,8 @@ class UniverseManager:
         try:
             value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
+                value = value.replace(tzinfo=UTC)
+            return value.astimezone(UTC)
         except Exception:
             return None
 
@@ -198,8 +200,15 @@ class UniverseManager:
             and cached.get("selected_size") == self.size
             and isinstance(cached.get("markets"), list)
             and len(cached.get("markets") or []) == self.size
+            and bool(
+                (cached.get("policy") or {}).get(
+                    "anti_hype_hard_exclude",
+                    not self.anti_hype_hard_exclude,
+                )
+            )
+            == self.anti_hype_hard_exclude
             and expiry is not None
-            and datetime.now(timezone.utc) < expiry
+            and datetime.now(UTC) < expiry
         ):
             return cached
         return self.refresh().to_dict()
@@ -271,11 +280,12 @@ class UniverseManager:
             if spread > self.maximum_spread_bps:
                 reject("SPREAD_TOO_WIDE")
                 continue
-            if (
+            anti_hype_flag = bool(
                 change_24h is not None
                 and self.maximum_positive_return_24h > 0
                 and change_24h > self.maximum_positive_return_24h
-            ):
+            )
+            if anti_hype_flag and self.anti_hype_hard_exclude:
                 reject("ANTI_HYPE_24H_RETURN")
                 continue
 
@@ -299,6 +309,7 @@ class UniverseManager:
                     "quote_volume_24h_eur": quote_volume,
                     "spread_bps": spread,
                     "return_24h": change_24h,
+                    "anti_hype_flag": anti_hype_flag,
                     "strict_liquidity": strict,
                     "preferred_liquidity": preferred,
                     "quality_tier": quality_tier,
@@ -342,7 +353,7 @@ class UniverseManager:
 
         fallback_count = sum(row["quality_tier"] != "PREFERRED" for row in selected)
         liquidity_degraded = fallback_count > 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         snapshot = UniverseSnapshot(
             schema_version="crypto_ai_swing_runtime_universe_v3",
             generated_at=now.isoformat(),
@@ -364,6 +375,7 @@ class UniverseManager:
                 "preferred_maximum_spread_bps": self.preferred_spread_bps,
                 "hard_maximum_spread_bps": self.maximum_spread_bps,
                 "maximum_positive_return_24h": self.maximum_positive_return_24h,
+                "anti_hype_hard_exclude": self.anti_hype_hard_exclude,
                 "shariah_filter": "NATIVE_CRYPTO_REPO_FAIL_CLOSED",
             },
         )
@@ -402,6 +414,8 @@ def screen_frame(frame) -> dict[str, float]:
         "momentum_component": float(momentum),
         "breakout_component": float(breakout),
         "volume_component": float(volume),
+        "ret_8": float(row.get("ret_8", 0.0) or 0.0),
         "ret_24": float(row.get("ret_24", 0.0) or 0.0),
+        "volume_z_48": float(row.get("volume_z_48", 0.0) or 0.0),
         "rsi_14": float(row.get("rsi_14", 50.0) or 50.0),
     }

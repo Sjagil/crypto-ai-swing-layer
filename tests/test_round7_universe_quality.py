@@ -52,7 +52,10 @@ def test_universe_prefers_tight_spreads_and_rejects_hype(tmp_path):
                 "maximum_spread_bps": 35,
                 "core_markets": [],
             },
-            "anti_hype": {"maximum_24h_return": 0.35},
+            "anti_hype": {
+                "maximum_24h_return": 0.35,
+                "hard_exclude_above_threshold": True,
+            },
         },
     )
     snapshot = UniverseManager(

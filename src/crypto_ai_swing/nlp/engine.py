@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import math
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -255,7 +256,7 @@ class NLPMarketEngine:
         market: str,
         now: datetime | None = None,
     ) -> NLPAggregation:
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         base = market.split("-", 1)[0].upper()
         market = market.upper()
         half_life_hours = float(self.config.get("half_life_hours", 12.0))
@@ -293,7 +294,7 @@ class NLPMarketEngine:
                 continue
             age_h = max(
                 0.0,
-                (now - usable_at.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                (now - usable_at.astimezone(UTC)).total_seconds() / 3600.0,
             )
             if age_h > maximum_age_hours:
                 scope_counts["expired"] += 1
@@ -407,9 +408,20 @@ class NLPMarketEngine:
                 diagnostics,
             )
         score = weighted_score / total_weight
-        confidence = min(
+        raw_confidence = min(
             0.95,
             0.20 + 0.07 * min(used, 8) + min(0.19, total_weight / 8.0),
+        )
+        confidence = raw_confidence
+        if int(scope_counts.get("direct_asset", 0)) == 0:
+            confidence = min(
+                confidence,
+                float(self.config.get("no_direct_asset_confidence_cap", 0.55)),
+            )
+        diagnostics["raw_confidence"] = float(raw_confidence)
+        diagnostics["effective_confidence"] = float(confidence)
+        diagnostics["direct_asset_evidence"] = bool(
+            scope_counts.get("direct_asset", 0)
         )
         assessment = NLPAssessment(
             float(max(-1.0, min(1.0, score))),
