@@ -381,6 +381,19 @@ class ModeController:
                     "NATIVE_CANARY_AUTHORITY_NOT_ACTIVE"
                 )
 
+            authority_state_status = str(
+                authority.get("state_status") or "UNKNOWN"
+            ).upper()
+            authority_state_ready = authority_state_status == "READY"
+            checks.append({"check": "native_canary_state_ready", "passed": authority_state_ready, "value": authority_state_status})
+            if not authority_state_ready:
+                blockers.append("NATIVE_CANARY_RECONCILIATION_NOT_READY")
+
+            native_execution_ready = bool(authority.get("execution_environment_ready"))
+            checks.append({"check": "native_execution_environment_ready", "passed": native_execution_ready})
+            if not native_execution_ready:
+                blockers.append("NATIVE_EXECUTION_ENVIRONMENT_NOT_READY")
+
             execution_environment = (
                 os.getenv(
                     "CRYPTO_SWING_CANARY_EXECUTE",

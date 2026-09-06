@@ -48,3 +48,13 @@ secrets.json
 # Local upgrade backups and atomic temp files
 .round*_backups/
 *.round*.tmp
+.env.local
+output/
+.v0261_backup/
+*.sqlite.bak
+*.db
+
+# Accidental shell-output artifacts
+/-m
+/-q
+/compileall

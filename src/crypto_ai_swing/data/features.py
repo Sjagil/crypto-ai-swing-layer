@@ -62,6 +62,42 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["atr_14"] = _atr(x, 14)
     out["atr_pct"] = out["atr_14"] / x["close"]
 
+    ema12 = x["close"].ewm(span=12, adjust=False).mean()
+    ema26 = x["close"].ewm(span=26, adjust=False).mean()
+    out["macd_line"] = ema12 - ema26
+    out["macd_signal"] = out["macd_line"].ewm(
+        span=9, adjust=False
+    ).mean()
+    out["macd_hist"] = out["macd_line"] - out["macd_signal"]
+    out["macd_hist_atr"] = (
+        out["macd_hist"] / out["atr_14"].replace(0.0, np.nan)
+    )
+    out["ema20_slope_5"] = out["ema_20"] / out["ema_20"].shift(5) - 1.0
+    out["roc_12"] = x["close"].pct_change(12)
+
+    up_move = x["high"].diff()
+    down_move = -x["low"].diff()
+    plus_dm = up_move.where(
+        (up_move > down_move) & (up_move > 0), 0.0
+    )
+    minus_dm = down_move.where(
+        (down_move > up_move) & (down_move > 0), 0.0
+    )
+    plus_smoothed = plus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    minus_smoothed = minus_dm.ewm(alpha=1 / 14, adjust=False).mean()
+    atr_safe = out["atr_14"].replace(0.0, np.nan)
+    out["plus_di_14"] = 100.0 * plus_smoothed / atr_safe
+    out["minus_di_14"] = 100.0 * minus_smoothed / atr_safe
+    di_sum = (out["plus_di_14"] + out["minus_di_14"]).replace(
+        0.0, np.nan
+    )
+    dx = (
+        100.0
+        * (out["plus_di_14"] - out["minus_di_14"]).abs()
+        / di_sum
+    )
+    out["adx_14"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+
     out["rv_24"] = ret1.rolling(24).std(ddof=0)
     out["rv_168"] = ret1.rolling(168).std(ddof=0)
     out["vol_regime"] = out["rv_24"] / out["rv_168"].replace(0.0, np.nan)
@@ -86,6 +122,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     low20 = x["low"].rolling(20).min().shift(1)
     out["breakout_20"] = x["close"] / high20 - 1.0
     out["distance_low_20"] = x["close"] / low20 - 1.0
+    high55 = x["high"].rolling(55).max().shift(1)
+    low55 = x["low"].rolling(55).min().shift(1)
+    out["breakout_55"] = x["close"] / high55 - 1.0
+    out["distance_low_55"] = x["close"] / low55 - 1.0
 
     vol_mean = x["volume"].rolling(48).mean()
     vol_std = x["volume"].rolling(48).std(ddof=0)
@@ -99,6 +139,33 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     out["dollar_volume"] = x["close"] * x["volume"]
     out["dollar_volume_log"] = np.log1p(out["dollar_volume"])
+
+    volume_mean20 = x["volume"].rolling(20).mean()
+    out["volume_ratio_20"] = (
+        x["volume"] / volume_mean20.replace(0.0, np.nan)
+    )
+    signed_volume = np.sign(x["close"].diff()).fillna(0.0) * x["volume"]
+    obv = signed_volume.cumsum()
+    out["obv_slope_20"] = (
+        (obv - obv.shift(20))
+        / x["volume"].rolling(20).sum().replace(0.0, np.nan)
+    )
+    money_flow_multiplier = (
+        (2.0 * x["close"] - x["high"] - x["low"])
+        / (x["high"] - x["low"]).replace(0.0, np.nan)
+    )
+    out["cmf_20"] = (
+        (money_flow_multiplier * x["volume"]).rolling(20).sum()
+        / x["volume"].rolling(20).sum().replace(0.0, np.nan)
+    )
+    out["bb_squeeze_ratio"] = (
+        out["bb_width"]
+        / out["bb_width"].rolling(120).median().replace(0.0, np.nan)
+    )
+    out["atr_expansion"] = (
+        out["atr_pct"]
+        / out["atr_pct"].rolling(120).median().replace(0.0, np.nan)
+    )
 
     out["range_pct"] = (x["high"] - x["low"]) / x["close"]
     out["close_location"] = (

@@ -13,6 +13,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .agents.rl_training import train_ppo_challenger
+from .agents.rl_multi_market import MultiMarketRLTrainer
+from .agents.edge_manager import ResearchEdgeManager
+from .intelligence.cmc_context import CMCContextCollector
 from .agents.runtime import AgentRuntime
 from .agents.training import AgentTrainer
 from .bridge.crypto_library import CryptoLibraryBridge
@@ -29,12 +32,14 @@ from .execution.bitvavo import live_gate_status
 from .execution.crypto_authority import CryptoAuthorityAdapter
 from .execution.paper_certification import certify_paper_lifecycle
 from .intelligence.crypto_news import CryptoNewsCollector
+from .monitoring.terminal_dashboard import run_terminal_dashboard
 from .nlp.engine import NLPMarketEngine
 from .orchestration.control_plane import ModeController
 from .orchestration.health import runtime_health
 from .orchestration.pipeline import SwingPipeline
 from .orchestration.proactive import ProactiveTrader
 from .orchestration.supervisor import AutonomousSupervisor
+from crypto_ai_swing.orchestration.unified_runtime import UnifiedAutonomyRuntime
 from .research.bootstrap import ColdStartResearchRunner
 from .research.forward import ForwardEvidenceLedger
 from .research.native import NativeResearchBridge
@@ -88,6 +93,60 @@ def _configured_canary_readiness(
             cfg.get("minimum_positive_return_rate", 0.50)
         ),
     )
+
+
+@app.command("terminal-dashboard")
+def terminal_dashboard(
+    refresh_hz: float = typer.Option(4.0, min=1.0, max=10.0),
+    public_feed: bool = typer.Option(
+        True,
+        "--public-feed/--no-public-feed",
+    ),
+) -> None:
+    """Run the read-only realtime terminal operations dashboard."""
+    run_terminal_dashboard(
+        _settings(),
+        refresh_hz=refresh_hz,
+        public_feed=public_feed,
+    )
+
+
+
+@app.command("edge-status")
+def edge_status(force: bool = typer.Option(False)) -> None:
+    s = _settings()
+    cfg = s.autonomy.get("forward_evidence", {}) if hasattr(s, "autonomy") else {}
+    rel = cfg.get("path", "output/crypto_ai_swing/forward/forward.sqlite")
+    manager = ResearchEdgeManager(s, mode="shadow")
+    payload = manager.refresh_policy(s.project_root / rel, force=force)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("cmc-context")
+def cmc_context(force: bool = typer.Option(True)) -> None:
+    s = _settings()
+    markets = list(UniverseManager(s).current()["markets"])
+    payload = CMCContextCollector(s).current(markets, force=force)
+    console.print_json(json.dumps(payload, default=str))
+
+
+@app.command("rl-train-universe")
+def rl_train_universe(
+    timesteps: int = typer.Option(50000, min=1000),
+) -> None:
+    s = _settings()
+    markets = list(UniverseManager(s).current()["markets"])
+    payload = MultiMarketRLTrainer(s).train(
+        markets=markets,
+        timeframe="1h",
+        total_timesteps=timesteps,
+        minimum_rows_per_market=int(
+            (s.agents.get("rl", {}) or {}).get(
+                "minimum_rows_per_market", 600
+            )
+        ),
+    )
+    console.print_json(json.dumps(payload, default=str))
 
 
 @app.command()
@@ -530,6 +589,16 @@ def proactive(
             "mode must be shadow, paper, or live"
         )
     s = _settings()
+    if mode == "live":
+        controller = ModeController(s)
+        mode_state = controller.status()
+        if mode_state.get("selected_mode") != "canary":
+            console.print_json(json.dumps({"status": "BLOCKED", "reason": "PERSISTENT_CANARY_MODE_NOT_SELECTED", "selected_mode": mode_state.get("selected_mode"), "orders_submitted": 0}))
+            raise typer.Exit(code=2)
+        live_preflight = controller.preflight("canary")
+        if not bool(live_preflight.get("ready")):
+            console.print_json(json.dumps({"status": "BLOCKED", "reason": "CANARY_MODE_PREFLIGHT_NOT_READY", "preflight": live_preflight, "orders_submitted": 0}, default=str))
+            raise typer.Exit(code=2)
     trader = ProactiveTrader(s, mode=mode)
     try:
         if once:
@@ -1563,22 +1632,16 @@ def paper_certify() -> None:
 def run_selected_mode(
     once: bool = typer.Option(False),
 ) -> None:
-    """Run supervisor from persistent mode state."""
+    """Run the unified autonomy service from persistent mode state."""
     s = _settings()
     controller = ModeController(s)
-    selected = controller.status()[
-        "selected_mode"
-    ]
-    preflight = controller.preflight(
-        selected
-    )
+    selected = controller.status()["selected_mode"]
+    preflight = controller.preflight(selected)
     if not bool(preflight.get("ready")):
         console.print_json(
             json.dumps(
                 {
-                    "status": (
-                        "BLOCKED_MODE_PREFLIGHT"
-                    ),
+                    "status": "BLOCKED_MODE_PREFLIGHT",
                     "mode": selected,
                     "preflight": preflight,
                     "orders_submitted": 0,
@@ -1588,7 +1651,7 @@ def run_selected_mode(
         )
         raise typer.Exit(code=2)
 
-    runner = AutonomousSupervisor(
+    runner = UnifiedAutonomyRuntime(
         s,
         mode=preflight["runtime_mode"],
     )
@@ -1596,9 +1659,7 @@ def run_selected_mode(
         if once:
             console.print_json(
                 json.dumps(
-                    runner.run_once(
-                        one_shot=True
-                    ),
+                    runner.run_once(one_shot=True),
                     default=str,
                 )
             )
@@ -1606,6 +1667,7 @@ def run_selected_mode(
             runner.run_forever()
     finally:
         runner.close()
+
 
 @app.command("storage-doctor")
 def storage_doctor(

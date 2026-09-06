@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from crypto_ai_swing.agents.training import AgentTrainer
+from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.orchestration.proactive import ProactiveTrader
 from crypto_ai_swing.research.bootstrap import ColdStartResearchRunner
@@ -41,6 +42,7 @@ class AutonomousSupervisor:
         self.universe = UniverseManager(settings)
         self.trader = ProactiveTrader(settings, mode=mode)
         self.trainer = AgentTrainer(settings)
+        self.rl_trainer = MultiMarketRLTrainer(settings)
         self.research = NativeResearchBridge(settings.crypto_repo_root)
         self.bootstrap_research = ColdStartResearchRunner(settings)
         self.operations = NativeOperationsBridge(
@@ -240,6 +242,36 @@ class AutonomousSupervisor:
                 self._last_completed_task = "agent_training"
             except Exception as exc:
                 errors.append({"task": "agent_training", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
+
+
+        rl_cfg = dict(acfg.get("rl", {}) or {})
+        if bool(rl_cfg.get("enabled", False)) and self._due(
+            "last_rl_train_at",
+            int(rl_cfg.get("retrain_seconds", 86400)),
+        ):
+            try:
+                self._task("rl_training")
+                configured = [
+                    str(x).upper()
+                    for x in acfg.get("training_markets", [])
+                    if str(x).strip()
+                ]
+                rl_markets = configured or list(universe.get("markets") or [])
+                tasks["rl_training"] = self.rl_trainer.train(
+                    markets=rl_markets,
+                    timeframe=str(rl_cfg.get("timeframe", "1h")),
+                    total_timesteps=int(rl_cfg.get("total_timesteps", 50000)),
+                    minimum_rows_per_market=int(
+                        rl_cfg.get("minimum_rows_per_market", 600)
+                    ),
+                )
+                self.state["last_rl_train_at"] = _now().isoformat()
+                self._last_completed_task = "rl_training"
+            except Exception as exc:
+                errors.append({
+                    "task": "rl_training",
+                    "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                })
 
         if self._due("last_economics_at", int(self.cfg.get("economics_refresh_seconds", 21600))):
             try:

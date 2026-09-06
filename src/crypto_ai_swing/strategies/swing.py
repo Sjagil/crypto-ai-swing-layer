@@ -46,6 +46,8 @@ def build_signal(
     predicted_return: float | None = None,
     predicted_mae: float | None = None,
     rl_score: float | None = None,
+    research_meta_score: float | None = None,
+    research_strategy_hint: str | None = None,
     nlp_score: float | None = None,
     nlp_confidence: float | None = None,
     nlp_severe_negative: bool = False,
@@ -73,6 +75,14 @@ def build_signal(
         votes.append(ModelVote("rl_challenger", float(rl_score), 0.40))
         weighted += float(rl_score) * 0.10
         weight += 0.10
+
+    if research_meta_score is not None and np.isfinite(research_meta_score):
+        meta = float(np.clip(research_meta_score, 0.0, 1.0))
+        votes.append(ModelVote("meta_edge_manager", meta, 0.70))
+        weighted += meta * 0.12
+        weight += 0.12
+        if research_strategy_hint:
+            family = str(research_strategy_hint)
 
     score = float(
         np.clip(weighted / max(weight, 1e-9), 0.0, 1.0)

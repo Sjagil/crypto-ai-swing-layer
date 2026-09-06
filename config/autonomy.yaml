@@ -1,10 +1,8 @@
 schema: crypto_ai_swing_autonomy_v4
-
 control_plane:
   fail_closed: true
   automatic_live_promotion: false
   direct_exchange_submission: false
-
 news:
   enabled: true
   source: crypto_repo_rss
@@ -13,7 +11,6 @@ news:
   persist: true
   fail_closed_for_new_entries_on_total_source_failure: false
   enrich_with_crypto_classifier: true
-
 forward_evidence:
   enabled: true
   path: output/crypto_ai_swing/forward/forward_v3.sqlite
@@ -21,7 +18,12 @@ forward_evidence:
   record_paper: true
   record_live: true
   mature_on_cycle: true
-  horizons_hours: [1, 4, 24]
+  horizons_hours:
+  - 1
+  - 4
+  - 24
+  - 72
+  - 168
   decision_bucket_minutes: 15
   execution_timeframe: 15m
   outcome_schema: observed_time_execution_tf_v3
@@ -31,8 +33,7 @@ forward_evidence:
     minimum_distinct_markets: 5
     minimum_observation_span_hours: 72
     minimum_mean_return_bps: 0.0
-    minimum_positive_return_rate: 0.50
-
+    minimum_positive_return_rate: 0.5
 research:
   native_crypto_factory: true
   automatic_candidate_generation: true
@@ -43,9 +44,93 @@ research:
   native_campaign_default_exact: false
   native_campaign_maximum_rows: 20000
   cold_start_walk_forward_folds: 3
-  cold_start_final_holdout_fraction: 0.20
+  cold_start_final_holdout_fraction: 0.2
   cold_start_max_finalists_per_family: 2
-
 causality:
   enforce_closed_candles: true
   lag_higher_timeframes_to_primary_close: true
+performance_attribution:
+  enabled: true
+  horizon_hours: 4
+  refresh_seconds: 900
+  minimum_observations: 30
+  bootstrap_draws: 3000
+  normal_and_stressed_cost_adjustment: true
+  paper_realized_attribution: true
+  live_decision_influence: false
+strategy_lab:
+  enabled: true
+  refresh_seconds: 3600
+  horizon_hours: 4
+  minimum_discovery_observations: 80
+  minimum_validation_selected: 20
+  minimum_prospective_selected: 30
+  minimum_prospective_span_hours: 72
+  minimum_positive_fraction: 0.55
+  minimum_uplift_bps: 5.0
+  multiple_testing_alpha: 0.05
+  stochastic_simulations: 10000
+  candidate_freeze_required: true
+  automatic_live_promotion: false
+  live_decision_influence: false
+net_edge_calibration:
+  enabled: true
+  refresh_seconds: 900
+  horizon_hours: 24
+  minimum_history_observations: 40
+  minimum_segment_observations: 8
+  prior_strength_observations: 24
+  minimum_expected_net_bps: 10.0
+  minimum_stressed_net_bps: 0.0
+  minimum_qualification_total: 120
+  minimum_qualification_selected: 30
+  minimum_positive_fraction: 0.35
+  minimum_probability_positive: 0.95
+  bootstrap_draws: 3000
+  sequential_prior_only_oos: true
+  canonical_stochastic_validation: true
+  exit_efficiency_diagnostics: true
+  live_decision_influence: false
+  automatic_live_promotion: false
+  minimum_profit_factor: 1.2
+  minimum_payoff_ratio: 1.1
+  maximum_cost_fraction_of_mean_winner: 0.35
+  full_costs_always_deducted: true
+swing_geometry:
+  enabled: true
+  refresh_seconds: 900
+  horizons_hours:
+  - 4
+  - 24
+  - 72
+  - 168
+  swing_horizons_hours:
+  - 24
+  - 72
+  - 168
+  anchor_horizon_hours: 24
+  minimum_geometry_fit_observations: 30
+  minimum_geometry_qualification_observations: 60
+  minimum_horizon_history_observations: 20
+  minimum_qualification_total: 120
+  minimum_oos_selected: 30
+  minimum_positive_fraction: 0.35
+  minimum_profit_factor: 1.2
+  minimum_payoff_ratio: 1.1
+  maximum_cost_fraction_of_mean_winner: 0.35
+  minimum_probability_positive: 0.95
+  minimum_fisher_bootstrap_cosine_median: 0.55
+  minimum_feature_coverage: 0.6
+  bootstrap_draws: 3000
+  covariance_estimator: LEDOIT_WOLF
+  eigendecomposition: SYMMETRIC_EIGH
+  fisher_solver: LINEAR_SOLVE_WITH_RIDGE
+  ood_metric: MAHALANOBIS
+  whitening: true
+  full_costs_always_deducted: true
+  reference_swing_moves_bps:
+  - 200
+  - 300
+  - 500
+  live_decision_influence: false
+  automatic_live_promotion: false

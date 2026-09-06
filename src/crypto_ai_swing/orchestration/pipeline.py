@@ -80,6 +80,8 @@ class SwingPipeline:
                 predicted_return=context.get("predicted_return"),
                 predicted_mae=context.get("predicted_mae"),
                 rl_score=context.get("rl_score"),
+                research_meta_score=context.get("research_meta_score"),
+                research_strategy_hint=context.get("research_strategy_hint"),
                 nlp_score=context.get("nlp_score"),
                 nlp_confidence=context.get("nlp_confidence"),
                 nlp_severe_negative=bool(

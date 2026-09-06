@@ -16,28 +16,91 @@ qualification:
   minimum_test_selected: 60
   minimum_validation_markets: 5
   minimum_test_markets: 6
-  minimum_test_positive_market_fraction: 0.50
+  minimum_test_positive_market_fraction: 0.5
   minimum_validation_alpha_auc: 0.52
-  minimum_test_alpha_auc: 0.50
+  minimum_test_alpha_auc: 0.5
   minimum_validation_regime_auc: 0.52
-  minimum_test_regime_auc: 0.50
+  minimum_test_regime_auc: 0.5
   minimum_validation_return_skill: 0.02
-  minimum_test_return_skill: 0.00
-  minimum_validation_brier_skill: 0.00
-  minimum_test_brier_skill: 0.00
-  maximum_validation_expected_calibration_error: 0.10
-  maximum_test_expected_calibration_error: 0.10
+  minimum_test_return_skill: 0.0
+  minimum_validation_brier_skill: 0.0
+  minimum_test_brier_skill: 0.0
+  maximum_validation_expected_calibration_error: 0.1
+  maximum_test_expected_calibration_error: 0.1
   multiple_testing_bootstrap_samples: 2000
   stochastic_simulations: 10000
   historical_trial_floor: 33
   require_point_in_time_universe_for_alpha: true
 calibration:
-  methods: [raw, sigmoid, isotonic]
-  calibration_fraction: 0.50
+  methods:
+  - raw
+  - sigmoid
+  - isotonic
+  calibration_fraction: 0.5
 rl:
-  enabled: false
-  algorithm: PPO
+  enabled: true
+  algorithm: PPO_TOURNAMENT
   long_only: true
   leverage: false
   shorting: false
   live_decision_influence: false
+  timeframe: 1h
+  total_timesteps: 50000
+  minimum_rows_per_market: 900
+  retrain_seconds: 86400
+  spot_only: true
+  shadow_signal_influence: true
+  automatic_live_promotion: false
+  candidate_seeds:
+  - 17
+  - 29
+  - 43
+  validation_fraction: 0.2
+  final_test_fraction: 0.2
+research_agent_panel:
+  enabled: true
+  authority: ADVISORY_ONLY
+  live_decision_influence: false
+  automatic_live_promotion: false
+  agents:
+  - alpha
+  - regime
+  - return
+  - risk
+  - execution
+  - bayesian_edge
+  - stochastic_validation
+  - rl_policy
+  - bayesian_forward
+  - cmc_context
+  - native_research
+  bayesian:
+    enabled: true
+    credibility: 0.9
+    minimum_observations: 30
+  stochastic:
+    use_native_crypto_repo: true
+    stationary_bootstrap: true
+    dirichlet_time_concentration: true
+    simulations: 10000
+edge_manager:
+  enabled: true
+  refresh_seconds: 900
+  minimum_observations: 100
+  minimum_holdout_selected: 30
+  research_round_trip_spread_bps: 8.0
+  stressed_extra_cost_bps: 25.0
+  shadow_influence_only_after_qualification: true
+  live_decision_influence: false
+  automatic_live_promotion: false
+  schema: adaptive_agent_manager_v4_multi_horizon
+  minimum_component_coverage: 0.25
+  maximum_component_weight: 0.35
+  exclude_known_unqualified_heads: true
+  unqualified_rl_weight: 0.0
+  require_net_edge_calibration: true
+  horizon_hours: 24
+  minimum_positive_fraction: 0.35
+  minimum_profit_factor: 1.2
+  minimum_payoff_ratio: 1.1
+  require_swing_geometry: true

@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 from crypto_ai_swing.agents.runtime import AgentRuntime
+from crypto_ai_swing.agents.rl_runtime import RLRuntime
+from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
 from crypto_ai_swing.bridge.crypto_library import (
     CryptoLibraryBridge,
 )
@@ -27,6 +29,11 @@ from crypto_ai_swing.execution.bitvavo import (
 )
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
 from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
+from crypto_ai_swing.intelligence.cmc_context import CMCContextCollector
+from crypto_ai_swing.intelligence.technical import (
+    multi_timeframe_snapshot,
+    technical_snapshot,
+)
 from crypto_ai_swing.nlp.engine import NLPMarketEngine
 from crypto_ai_swing.nlp.sources import (
     discover_crypto_repo_documents,
@@ -38,8 +45,14 @@ from crypto_ai_swing.orchestration.rally_capture import (
     macro_override_allowed,
 )
 from crypto_ai_swing.orchestration.timeframe_pipeline import evaluate_timeframe_pipeline
+from crypto_ai_swing.orchestration.mtf_challenger import evaluate_mtf_challenger
+from crypto_ai_swing.quant.bayesian_forward import (
+    build_bayesian_forward_snapshot,
+    persist as persist_bayesian_forward,
+)
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
+from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
 
 
 @dataclass(frozen=True)
@@ -201,6 +214,12 @@ class ProactiveTrader:
         self.state = ProactiveState(
             self.mode_root / "proactive" / state_name
         )
+        self.paper_ledger = PaperPortfolioLedger(
+            self.mode_root / "proactive" / "paper_ledger.sqlite",
+            starting_equity=Decimal(str(
+                self.settings.proactive.get("shadow_equity_eur", 10000)
+            )),
+        )
         self.nlp = NLPMarketEngine(settings.nlp)
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         # Direct REST is retained only for the already-existing private
@@ -227,6 +246,9 @@ class ProactiveTrader:
             decision_bucket_minutes=int(forward_cfg.get("decision_bucket_minutes", 15)),
         )
         self.agents = AgentRuntime(settings, mode=self.mode)
+        self.rl = RLRuntime(settings)
+        self.cmc_context = CMCContextCollector(settings)
+        self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
         self.execution_authority = CryptoAuthorityAdapter(settings.crypto_repo_root)
         self.universe = UniverseManager(settings)
         self._news_cache: tuple[float, list] | None = None
@@ -271,50 +293,65 @@ class ProactiveTrader:
         )
         return fallback, fallback, Decimal(0)
 
-    def _simulated_portfolio_account(
-        self,
-    ) -> tuple[Decimal, Decimal, Decimal]:
-        """Mark local shadow/paper positions into account capacity."""
-        starting_equity = Decimal(
-            str(
-                self.settings.proactive.get(
-                    "shadow_equity_eur", 10000
-                )
-            )
-        )
-        cost_basis = Decimal(0)
-        marked_exposure = Decimal(0)
-        state = getattr(self, "state", None)
-        simulated_positions = (
-            state.positions() if state is not None else {}
-        )
-        for market, pos in simulated_positions.items():
-            cost_basis += pos.amount * pos.entry_price
+    def _paper_fee_bps(self) -> Decimal:
+        costs = dict((self.settings.execution.get("costs", {}) or {}))
+        return Decimal(str(costs.get("fee_bps_per_side", 25.0)))
+
+    def _paper_mark_prices(self, positions) -> dict[str, Decimal]:
+        marks: dict[str, Decimal] = {}
+        for market, pos in positions.items():
             mark = pos.entry_price
             try:
                 bundle = self.crypto.market_bundle(
-                    market,
-                    "1h",
-                    mode=self.mode,
-                    persist=False,
-                    depth=5,
+                    market, "1h", mode=self.mode, persist=False, depth=5
                 )
-                raw_mark = (
+                raw = (
                     bundle.microstructure.get("best_bid")
                     or bundle.microstructure.get("best_ask")
                     or "0"
                 )
-                candidate = Decimal(str(raw_mark))
+                candidate = Decimal(str(raw))
                 if candidate > 0:
                     mark = candidate
             except Exception:
-                # Fail conservatively to cost basis if a mark is unavailable.
                 pass
-            marked_exposure += pos.amount * mark
+            marks[str(market).upper()] = mark
+        return marks
 
-        cash = starting_equity - cost_basis
-        equity = cash + marked_exposure
-        return equity, cash, marked_exposure
+    def _simulated_portfolio_account(
+        self,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        starting_equity = Decimal(
+            str(self.settings.proactive.get("shadow_equity_eur", 10000))
+        )
+        state = getattr(self, "state", None)
+        positions = state.positions() if state is not None else {}
+        ledger = getattr(self, "paper_ledger", None)
+        if ledger is None:
+            cost_basis = Decimal(0)
+            exposure = Decimal(0)
+            marks = self._paper_mark_prices(positions)
+            for market, pos in positions.items():
+                cost_basis += pos.amount * pos.entry_price
+                exposure += pos.amount * marks.get(
+                    str(market).upper(), pos.entry_price
+                )
+            cash = starting_equity - cost_basis
+            return cash + exposure, cash, exposure
+
+        ledger.ensure_open_positions(
+            positions, fee_bps=self._paper_fee_bps()
+        )
+        snapshot = ledger.snapshot(
+            positions, self._paper_mark_prices(positions)
+        )
+        self._last_paper_accounting = snapshot
+        return (
+            Decimal(str(snapshot["equity_eur"])),
+            Decimal(str(snapshot["cash_eur"])),
+            Decimal(str(snapshot["exposure_eur"])),
+        )
+
 
     def _private_account_enabled(self) -> bool:
         account_cfg = self.settings.proactive.get("account", {}) or {}
@@ -503,6 +540,53 @@ class ProactiveTrader:
 
     def _execute_buy(self, intent: TradeIntent) -> dict[str, Any]:
         if self.mode != "live":
+            equity_now, cash_now, exposure_now = self._simulated_portfolio_account()
+            paper_state = getattr(self, "_last_paper_accounting", {}) or {}
+            if paper_state.get("reconciliation_required"):
+                return {
+                    "mode": self.mode,
+                    "accepted": False,
+                    "simulated": True,
+                    "execution_backend": "paper_portfolio_ledger",
+                    "reason_code": "SIMULATED_ACCOUNT_RECONCILIATION_REQUIRED",
+                    "intent_id": intent.intent_id,
+                }
+            fee_fraction = self._paper_fee_bps() / Decimal("10000")
+            required_cash = intent.notional_eur * (Decimal(1) + fee_fraction)
+            if cash_now < required_cash:
+                return {
+                    "mode": self.mode,
+                    "accepted": False,
+                    "simulated": True,
+                    "execution_backend": "paper_portfolio_ledger",
+                    "reason_code": "SIMULATED_INSUFFICIENT_CASH",
+                    "required_cash_eur": str(required_cash),
+                    "available_cash_eur": str(cash_now),
+                    "intent_id": intent.intent_id,
+                }
+            portfolio_cfg = dict((self.settings.risk.get("portfolio", {}) or {}))
+            max_fraction = Decimal(str(portfolio_cfg.get(
+                "max_total_exposure_fraction",
+                portfolio_cfg.get("max_exposure_fraction", 0.85),
+            )))
+            projected_exposure = exposure_now + intent.notional_eur
+            if (
+                equity_now > 0
+                and max_fraction > 0
+                and projected_exposure / equity_now > max_fraction
+            ):
+                return {
+                    "mode": self.mode,
+                    "accepted": False,
+                    "simulated": True,
+                    "execution_backend": "paper_portfolio_ledger",
+                    "reason_code": "SIMULATED_EXPOSURE_CAP",
+                    "projected_exposure_eur": str(projected_exposure),
+                    "equity_eur": str(equity_now),
+                    "maximum_exposure_fraction": str(max_fraction),
+                    "intent_id": intent.intent_id,
+                }
+        if self.mode != "live":
             return {
                 "mode": self.mode,
                 "simulated": True,
@@ -631,6 +715,28 @@ class ProactiveTrader:
         except Exception: return
         if price<=0 or amount<=0:return
         self.state.upsert_position(Position(intent.market,amount,price,price,intent.stop_pct,intent.take_profit_pct,intent.trailing_stop_pct,datetime.now(UTC).isoformat()))
+        ledger = getattr(self, "paper_ledger", None)
+        if ledger is not None:
+            ledger.record_buy(
+                event_id=f"paper-buy:{intent.intent_id}",
+                market=intent.market,
+                quantity=amount,
+                price=price,
+                fee_bps=self._paper_fee_bps(),
+                payload={
+                    "mode": self.mode,
+                    "intent_id": intent.intent_id,
+                    "execution_backend": execution.get("execution_backend"),
+                    "strategy": intent.strategy,
+                    "expected_edge_bps": str(intent.expected_edge_bps),
+                    "estimated_round_trip_cost_bps": str(
+                        intent.estimated_round_trip_cost_bps
+                    ),
+                    "net_edge_bps": str(intent.net_edge_bps),
+                    "intent_metadata": intent.metadata,
+                    "attribution_schema": "paper_intent_context_v1",
+                },
+            )
 
     def _manage_exits(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -700,6 +806,17 @@ class ProactiveTrader:
                     "reason": reason,
                 }
             )
+            ledger = getattr(self, "paper_ledger", None)
+            if ledger is not None:
+                ledger.record_sell(
+                    event_id=f"paper-sell:{market}:{pos.opened_at}:{reason}",
+                    market=market,
+                    quantity=pos.amount,
+                    entry_price=pos.entry_price,
+                    exit_price=price,
+                    fee_bps=self._paper_fee_bps(),
+                    payload={"mode": self.mode, "reason": reason},
+                )
             self.state.delete_position(market)
         return events
 
@@ -762,11 +879,30 @@ class ProactiveTrader:
     def cycle(self) -> dict[str, Any]:
         markets = self._markets()
         universe_snapshot = self.universe.current()
+        try:
+            cmc_context = self.cmc_context.current(markets)
+        except Exception as exc:
+            cmc_context = {
+                'status': 'ERROR',
+                'error': f'{type(exc).__name__}:{str(exc)[:300]}',
+                'runtime_assets': {},
+                'authority': 'CONTEXT_ONLY',
+                'live_decision_influence': False,
+            }
         universe_candidates = {
             str(row.get("market")): dict(row)
             for row in (universe_snapshot.get("candidates") or [])
             if isinstance(row, dict) and row.get("market")
         }
+        try:
+            edge_policy = self.edge_manager.refresh_policy(self.forward.path)
+        except Exception as exc:
+            edge_policy = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                "shadow_influence": False,
+                "live_decision_influence": False,
+            }
         self._sync_live_positions(markets)
         exit_events = self._manage_exits()
         docs = self._news()
@@ -826,6 +962,9 @@ class ProactiveTrader:
                 continue
             causal_primary[market] = causal
             screen_row = screen_frame(causal)
+            screen_row["technical"] = technical_snapshot(
+                causal, timeframe=primary
+            )
             universe_row = universe_candidates.get(market, {})
             try:
                 spread_hint = float(universe_row.get("spread_bps"))
@@ -851,6 +990,24 @@ class ProactiveTrader:
                 screen_row,
                 rally_cfg,
             ).to_dict()
+            cmc_asset = dict(
+                (cmc_context.get('runtime_assets') or {}).get(market) or {}
+            )
+            agent_preview = self.agents.predict_frame(
+                market, causal, {'spread_bps': spread_hint, 'cmc': cmc_asset}
+            )
+            rl_preview = self.rl.predict_frame(causal)
+            screen_row["agent_preview"] = {
+                'alpha_probability': agent_preview.alpha_probability,
+                'regime_score': agent_preview.regime_score,
+                'forecast_score': agent_preview.forecast_score,
+                'predicted_return': agent_preview.predicted_return,
+                'predicted_mae': agent_preview.predicted_mae,
+                'execution_score': agent_preview.execution_score,
+                'live_influence': agent_preview.live_influence,
+            }
+            screen_row["rl_preview"] = rl_preview
+            screen_row["cmc"] = cmc_asset
             screen[market] = screen_row
 
         ranked = sorted(
@@ -928,6 +1085,9 @@ class ProactiveTrader:
                 if causal_frames.get(primary) is None or causal_frames[primary].empty:
                     skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_CANDLE"})
                     continue
+                technical_mtf = multi_timeframe_snapshot(
+                    causal_frames
+                )
                 tf_decision = evaluate_timeframe_pipeline(
                     causal_frames, bundle.microstructure, observed_at=observed_at,
                     maximum_spread_bps=float(
@@ -983,6 +1143,7 @@ class ProactiveTrader:
                     "nlp_diagnostics": nlp_aggregation.diagnostics,
                     "mtf_score": mtf,
                     "timeframe_pipeline": tf_decision.to_dict(),
+                    "technical_intelligence": technical_mtf,
                     "orderflow_score": orderflow,
                     "book_imbalance": bundle.microstructure.get("book_imbalance", 0.0),
                     "cvd_ratio": bundle.microstructure.get("cvd_ratio", 0.0),
@@ -1032,7 +1193,41 @@ class ProactiveTrader:
                 context[market]["agent_entry_blocked"] = bool(
                     agent_decision.entry_blocked
                 )
-                context[market]["rl_score"] = None
+                rl_preview = dict(
+                    screen.get(market, {}).get('rl_preview') or {}
+                )
+                context[market]["rl"] = rl_preview
+                context[market]["cmc"] = dict(
+                    (cmc_context.get('runtime_assets') or {}).get(market) or {}
+                )
+                rl_cfg = dict((self.settings.agents.get('rl', {}) or {}))
+                context[market]["rl_score"] = (
+                    float(rl_preview['score'])
+                    if self.mode != 'live'
+                    and bool(rl_cfg.get('shadow_signal_influence', True))
+                    and bool(rl_preview.get('qualified', False))
+                    and rl_preview.get('score') is not None
+                    else None
+                )
+                mtf_challenger = evaluate_mtf_challenger(
+                    tf_decision,
+                    microstructure=bundle.microstructure,
+                    cmc_asset=context[market].get("cmc", {}),
+                    cmc_context=cmc_context,
+                )
+                context[market]["mtf_challenger"] = mtf_challenger.to_dict()
+                edge_decision = self.edge_manager.evaluate_market(
+                    context[market],
+                    policy=edge_policy,
+                )
+                context[market]["edge_manager"] = edge_decision
+                context[market]["research_meta_score"] = edge_decision.get("signal_score")
+                context[market]["research_strategy_hint"] = (
+                    edge_decision.get("strategy_hint")
+                    or mtf_challenger.strategy_family
+                    if edge_decision.get("signal_score") is not None
+                    else None
+                )
                 mtf_summary[market] = {
                     tf: len(causal_frames.get(tf, pd.DataFrame())) for tf in timeframes
                 }
@@ -1109,6 +1304,24 @@ class ProactiveTrader:
                 )
                 positions_for_execution = self.state.positions()
 
+        # post_execution_account_refresh_v0232
+        paper_accounting = None
+        if self.mode in {"shadow", "paper"}:
+            equity, cash, exposure = self._account(markets)
+            positions_for_risk = self.state.positions()
+            open_risk_eur = sum(
+                (
+                    pos.amount
+                    * pos.entry_price
+                    * Decimal(str(pos.stop_pct))
+                    for pos in positions_for_risk.values()
+                ),
+                Decimal(0),
+            )
+            paper_accounting = getattr(
+                self, "_last_paper_accounting", None
+            )
+
         payload = {
             "generated_at": datetime.now(UTC).isoformat(),
             "mode": self.mode,
@@ -1131,9 +1344,17 @@ class ProactiveTrader:
             "rally_deep_scan_limit": rally_scan_limit,
             "rally_deep_scan_markets": rally_deep_markets,
             "screen": screen,
+            "cmc_context": cmc_context,
+            "edge_policy": edge_policy,
+            "full_universe_agent_inference": {
+                "market_count": sum(bool(row.get("agent_preview")) for row in screen.values()),
+                "rl_market_count": sum((row.get("rl_preview") or {}).get("score") is not None for row in screen.values()),
+                "live_decision_influence": False,
+            },
             "equity_eur": str(equity),
             "cash_eur": str(cash),
             "exposure_eur": str(exposure),
+            "paper_accounting": paper_accounting,
             "open_risk_eur": str(open_risk_eur),
             "position_capacity": {
                 "maximum_positions": maximum_positions,
@@ -1193,6 +1414,21 @@ class ProactiveTrader:
             payload["forward_evidence"] = {"recorded": False, "ledger": self.forward.status(), "outcomes": self.forward.outcome_status()}
 
         payload["prospective_canary_readiness"] = self._prospective_canary_readiness()
+
+        try:
+            bayesian = build_bayesian_forward_snapshot(self.forward.path, horizon_hours=4, draws=5000)
+            persist_bayesian_forward(
+                bayesian,
+                self.settings.project_root / "output/crypto_ai_swing/agents/bayesian_forward.json",
+            )
+        except Exception as exc:
+            bayesian = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                "authority": "RESEARCH_ONLY",
+                "live_decision_influence": False,
+            }
+        payload["bayesian_forward"] = bayesian
 
         out = self.mode_root / "proactive" / "latest.json"
         out.parent.mkdir(parents=True, exist_ok=True)
