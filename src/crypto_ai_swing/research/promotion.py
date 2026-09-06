@@ -13,7 +13,7 @@ def _now() -> str:
 class ResearchPromotionRegistry:
     """Research-only registry for meta, strategy, geometry and RL challengers."""
 
-    SCHEMA = "crypto_ai_swing_research_promotion_registry_v4"
+    SCHEMA = "crypto_ai_swing_research_promotion_registry_v5"
 
     def __init__(self, settings) -> None:
         self.settings = settings
@@ -50,6 +50,11 @@ class ResearchPromotionRegistry:
 
     def _swing_geometry(self) -> dict[str, Any] | None:
         return self._artifact("output/crypto_ai_swing/research/swing_geometry/latest.json")
+
+    def _entry_selector(self) -> dict[str, Any] | None:
+        return self._artifact(
+            "output/crypto_ai_swing/research/entry_selector/latest.json"
+        )
 
     def _rl(self) -> dict[str, Any] | None:
         pointer = Path(self.settings.project_root) / "output/crypto_ai_swing/agents/rl/latest.pointer.json"
@@ -97,17 +102,28 @@ class ResearchPromotionRegistry:
         attribution = self._attribution()
         net_edge = self._net_edge()
         swing_geometry = self._swing_geometry()
+        entry_selector = self._entry_selector()
         challengers = [
             self._entry("edge", edge),
             self._entry("strategy_lab", strategy),
             self._entry("swing_geometry", swing_geometry),
+            self._entry("entry_selector", entry_selector),
             self._entry("rl", rl),
         ]
         champion = None
         if strategy and isinstance(strategy.get("champion"), dict):
             champion = {
                 **dict(strategy["champion"]),
-                "promotion_scope": "RESEARCH_ONLY",
+                "entry_selector": {
+                "status": (entry_selector or {}).get("status", "MISSING"),
+                "qualified": bool(
+                    (entry_selector or {}).get("qualified", False)
+                ),
+                "observations": (entry_selector or {}).get("observations"),
+                "artifact_path": (entry_selector or {}).get("artifact_path"),
+                "live_decision_influence": False,
+            },
+            "promotion_scope": "RESEARCH_ONLY",
                 "live_decision_influence": False,
             }
         payload = {

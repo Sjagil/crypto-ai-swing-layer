@@ -18,6 +18,7 @@ from crypto_ai_swing.research.performance_attribution import PerformanceAttribut
 from crypto_ai_swing.research.promotion import ResearchPromotionRegistry
 from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.research.swing_geometry import SwingGeometryEngine
+from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
 from crypto_ai_swing.universe.runtime import UniverseManager
 
 
@@ -35,7 +36,7 @@ class TaskSpec:
 class UnifiedAutonomyRuntime:
     """One process for trading, evidence, attribution and challenger research."""
 
-    SCHEMA = "crypto_ai_swing_unified_autonomy_v3"
+    SCHEMA = "crypto_ai_swing_unified_autonomy_v4"
 
     def __init__(self, settings, *, mode: str = "shadow") -> None:
         self.settings = settings
@@ -54,6 +55,9 @@ class UnifiedAutonomyRuntime:
         self.attribution = PerformanceAttributionEngine(settings, mode=self.mode)
         self.strategy_lab = StrategyChallengerLab(settings, mode=self.mode)
         self.swing_geometry = SwingGeometryEngine(settings, mode=self.mode)
+        self.entry_selector = ProspectiveSwingEntrySelector(
+            settings, mode=self.mode
+        )
         self.edge = ResearchEdgeManager(settings, mode="shadow" if self.mode == "live" else self.mode)
         self.rl = MultiMarketRLTrainer(settings)
         self.registry = ResearchPromotionRegistry(settings)
@@ -150,6 +154,9 @@ class UnifiedAutonomyRuntime:
     def _refresh_swing_geometry(self) -> dict[str, Any]:
         return self.swing_geometry.refresh(force=True)
 
+    def _refresh_entry_selector(self) -> dict[str, Any]:
+        return self.entry_selector.refresh(force=True)
+
     def _refresh_edge(self) -> dict[str, Any]:
         ledger = self._forward_ledger()
         try:
@@ -203,6 +210,18 @@ class UnifiedAutonomyRuntime:
             ),
         )
 
+    def _v027_task_specs(self) -> tuple[TaskSpec, ...]:
+        selector = dict(
+            getattr(self, "autonomy", {}).get("entry_selector", {}) or {}
+        )
+        return (
+            TaskSpec(
+                "entry_selector",
+                int(selector.get("refresh_seconds", 900)),
+                self._refresh_entry_selector,
+            ),
+        )
+
     def _record_task(self, name: str, result: dict[str, Any] | None, error: Exception | None = None) -> None:
         row: dict[str, Any] = {
             "completed_at": _now().isoformat(),
@@ -246,7 +265,12 @@ class UnifiedAutonomyRuntime:
         except Exception as exc:
             errors.append({"task": "trading_and_core_supervisor", "error": f"{type(exc).__name__}:{str(exc)[:500]}"})
 
-        for spec in (*self._v024_task_specs(), *self._v026_task_specs(), *self._task_specs()):
+        for spec in (
+            *self._v024_task_specs(),
+            *self._v026_task_specs(),
+            *self._v027_task_specs(),
+            *self._task_specs(),
+        ):
             if not self._due(spec.name, spec.every_seconds):
                 results[spec.name] = {"status": "NOT_DUE", "every_seconds": spec.every_seconds}
                 continue
@@ -289,6 +313,8 @@ class UnifiedAutonomyRuntime:
             "agent_manager_enabled": True,
             "multi_horizon_swing_geometry_enabled": True,
             "advanced_linear_algebra_enabled": True,
+            "prospective_swing_entry_selector_enabled": True,
+            "abstention_is_first_class": True,
             "champion_is_immutable_during_execution": True,
             "challengers_research_only": True,
             "live_authority_granted_by_runtime": False,

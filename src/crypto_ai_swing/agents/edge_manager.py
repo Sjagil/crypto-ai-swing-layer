@@ -27,6 +27,7 @@ from crypto_ai_swing.research.performance_attribution import (
 from crypto_ai_swing.research.net_edge_calibration import NetEdgeCalibrator
 from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.research.swing_geometry import SwingGeometryEngine
+from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
 
 
 def _net_costs(settings) -> tuple[float, float]:
@@ -80,7 +81,7 @@ class ResearchEdgeManager:
     out-of-sample qualification. It can never grant live authority.
     """
 
-    SCHEMA = "research_edge_manager_v4"
+    SCHEMA = "research_edge_manager_v5"
 
     def __init__(self, settings, mode: str = "shadow") -> None:
         self.settings = settings
@@ -104,6 +105,9 @@ class ResearchEdgeManager:
         self.strategy_lab = StrategyChallengerLab(settings, mode=mode)
         self.calibrator = NetEdgeCalibrator(settings, mode=mode)
         self.swing_geometry = SwingGeometryEngine(settings, mode=mode)
+        self.entry_selector = ProspectiveSwingEntrySelector(
+            settings, mode=mode
+        )
 
     def _read_latest(self) -> dict[str, Any]:
         try:
@@ -357,6 +361,22 @@ class ResearchEdgeManager:
                 "live_decision_influence": False,
             }
 
+        selector_engine = getattr(self, "entry_selector", None)
+        if selector_engine is not None:
+            selector = selector_engine.refresh(force=force)
+            selector_summary = selector_engine.policy_summary(selector)
+        else:
+            selector = {
+                "status": "COLLECTING",
+                "qualified": False,
+                "observations": len(rows),
+            }
+            selector_summary = {
+                **selector,
+                "reason_codes": ["ENTRY_SELECTOR_NOT_INITIALIZED"],
+                "live_decision_influence": False,
+            }
+
         if len(rows) < self.minimum_observations:
             weights, health = self._availability_priors(rows)
             policy = {
@@ -375,6 +395,7 @@ class ResearchEdgeManager:
                     "champion": (strategy.get("champion") or {}).get("name") if isinstance(strategy.get("champion"), dict) else None,
                 },
                 "net_edge_calibration": calibration_summary,
+                "entry_selector": selector_summary,
                 "swing_geometry": geometry_summary,
                 "horizon_hours": int(getattr(self, "horizon_hours", 4)),
                 "shadow_influence": False,
@@ -428,6 +449,7 @@ class ResearchEdgeManager:
             "improves_baseline": improvement is not None and improvement > 0.0,
             "net_edge_calibration": bool(calibration.get("qualified", False)),
             "swing_geometry": bool(geometry.get("qualified", False)),
+            "entry_selector": bool(selector.get("qualified", False)),
         }
         qualified = all(checks.values())
         policy = {
@@ -460,6 +482,7 @@ class ResearchEdgeManager:
                 "champion": champion.get("name") if champion else None,
             },
             "net_edge_calibration": calibration_summary,
+            "entry_selector": selector_summary,
             "swing_geometry": geometry_summary,
             "horizon_hours": int(getattr(self, "horizon_hours", 4)),
             "checks": checks,
@@ -511,6 +534,13 @@ class ResearchEdgeManager:
             else {"status": "COLLECTING", "passes": False}
         )
         passes_geometry = geometry_gate.get("passes") is True
+        selector_engine = getattr(self, "entry_selector", None)
+        selector_gate = (
+            selector_engine.evaluate_context(context)
+            if selector_engine is not None
+            else {"status": "COLLECTING", "passes": False}
+        )
+        passes_selector = selector_gate.get("passes") is True
         signal_score = (
             score
             if (
@@ -520,6 +550,7 @@ class ResearchEdgeManager:
                 and passes_strategy
                 and passes_economics
                 and passes_geometry
+                and passes_selector
             )
             else None
         )
@@ -547,6 +578,7 @@ class ResearchEdgeManager:
             "strategy_champion_gate": strategy_gate,
             "net_edge_gate": economics_gate,
             "swing_geometry_gate": geometry_gate,
+            "entry_selector_gate": selector_gate,
             "strategy_hint": strategy_gate.get("champion") if strategy_pass else None,
             "signal_score": signal_score,
             "shadow_influence": signal_score is not None,

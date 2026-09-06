@@ -134,3 +134,36 @@ swing_geometry:
   - 500
   live_decision_influence: false
   automatic_live_promotion: false
+
+entry_selector:
+  enabled: true
+  refresh_seconds: 900
+  horizons_hours:
+  - 24
+  - 72
+  - 168
+  minimum_train_observations: 24
+  minimum_qualification_total: 120
+  minimum_oos_selected: 30
+  minimum_geometry_probability: 0.62
+  minimum_expected_normal_net_bps: 20.0
+  minimum_expected_stressed_net_bps: 0.0
+  minimum_expected_mfe_cost_multiple: 2.0
+  minimum_expected_mfe_to_mae: 1.2
+  minimum_positive_fraction: 0.35
+  minimum_profit_factor: 1.2
+  minimum_payoff_ratio: 1.1
+  minimum_probability_positive: 0.95
+  maximum_selection_fraction: 0.45
+  minimum_return_direction_bootstrap_cosine_median: 0.55
+  minimum_feature_coverage: 0.6
+  ridge: 1.0
+  maximum_factors: 8
+  bootstrap_draws: 3000
+  sequential_delayed_label_oos: true
+  abstention_is_first_class: true
+  full_costs_always_deducted: true
+  canonical_stochastic_validation: true
+  paper_shadow_influence_only_after_qualification: true
+  live_decision_influence: false
+  automatic_live_promotion: false
