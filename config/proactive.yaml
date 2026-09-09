@@ -33,7 +33,7 @@ active_swing:
   execution_validation_canary:
     enabled: true
     manual_authority_required: true
-    maximum_order_eur: 10.0
+    maximum_order_eur: 25.0
     minimum_signal_score: 0.74
     minimum_mtf_score: 0.0
     minimum_orderflow_score: -0.35

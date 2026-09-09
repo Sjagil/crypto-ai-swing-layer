@@ -1,0 +1,33 @@
+name: optuna-runtime
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+
+jobs:
+  isolated-optuna:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install main runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,crypto-runtime]'
+      - name: Build isolated Optuna runtime
+        run: |
+          python -m venv .venvs/optuna
+          .venvs/optuna/bin/python -m pip install --upgrade pip
+          .venvs/optuna/bin/python -m pip install 'optuna>=4,<5'
+      - name: Round 28 tests
+        run: |
+          python -m compileall -q src scripts tests
+          python -m ruff check src tests scripts
+          python -m pytest -q tests/test_round28_optuna_runtime.py
+          python scripts/optuna_runtime_status.py --smoke

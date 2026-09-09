@@ -53,6 +53,7 @@ from crypto_ai_swing.quant.bayesian_forward import (
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
 from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
+from crypto_ai_swing.production.guard import LiveExecutionGuard
 
 
 @dataclass(frozen=True)
@@ -250,6 +251,9 @@ class ProactiveTrader:
         self.cmc_context = CMCContextCollector(settings)
         self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
         self.execution_authority = CryptoAuthorityAdapter(settings.crypto_repo_root)
+        self.production_guard = LiveExecutionGuard(
+            settings, self.execution_authority
+        )
         self.universe = UniverseManager(settings)
         self._news_cache: tuple[float, list] | None = None
         self._last_news_status: dict[str, Any] = {
@@ -262,6 +266,9 @@ class ProactiveTrader:
         self.state.close()
         self.forward.close()
         self.client.close()
+        guard = getattr(self, "production_guard", None)
+        if guard is not None:
+            guard.close()
 
     def _markets(self) -> list[str]:
         import os
@@ -663,10 +670,16 @@ class ProactiveTrader:
             preflight = None
 
         try:
-            result = self.execution_authority.submit_buy(intent)
+            guard = getattr(self, "production_guard", None)
+            if guard is None:
+                raise RuntimeError("PRODUCTION_GUARD_NOT_INITIALIZED")
+            guarded = guard.submit_buy(
+                intent,
+                markets=self._markets(),
+                canonical_preflight=preflight,
+            )
             return {
                 "mode": "live",
-                "accepted": result.accepted,
                 "execution_backend": "Sjagil/crypto:core.swing_layer_live",
                 "execution_validation_canary": validation_canary,
                 "economic_edge_unproven": validation_canary,
@@ -674,7 +687,7 @@ class ProactiveTrader:
                 "autoscale_authorized": False,
                 "prospective_readiness": readiness,
                 "canonical_preflight": preflight,
-                **result.payload,
+                **guarded,
             }
         except Exception as exc:
             return {
@@ -691,8 +704,17 @@ class ProactiveTrader:
     def _sync_live_positions(self, markets: list[str]) -> None:
         if self.mode != "live": return
         try:
-            self.execution_authority.reconcile(markets)
-            canonical = dict(self.execution_authority.portfolio().get("positions") or {})
+            guard = getattr(self, "production_guard", None)
+            if guard is not None:
+                reconciliation = guard.reconcile(markets)
+                self._last_live_reconciliation = reconciliation
+                if not bool(reconciliation.get("ready")):
+                    return
+            else:
+                self.execution_authority.reconcile(markets)
+            canonical = dict(
+                self.execution_authority.portfolio().get("positions") or {}
+            )
         except Exception:
             return
         local = self.state.positions()
@@ -793,9 +815,25 @@ class ProactiveTrader:
                 continue
             if self.mode == "live":
                 try:
-                    result=self.execution_authority.submit_exit(market=market,reason=reason,quantity=str(pos.amount))
-                    events.append({"market":market,"action":"LIVE_EXIT","reason":reason,"accepted":result.accepted,"execution":result.payload})
-                    if result.accepted:self._sync_live_positions([market])
+                    guard = getattr(self, "production_guard", None)
+                    if guard is None:
+                        raise RuntimeError("PRODUCTION_GUARD_NOT_INITIALIZED")
+                    guarded = guard.submit_exit(
+                        market=market,
+                        reason=reason,
+                        quantity=str(pos.amount),
+                        markets=self._markets(),
+                    )
+                    accepted = bool(guarded.get("accepted"))
+                    events.append({
+                        "market": market,
+                        "action": "LIVE_EXIT",
+                        "reason": reason,
+                        "accepted": accepted,
+                        "execution": guarded,
+                    })
+                    if accepted:
+                        self._sync_live_positions([market])
                 except Exception as exc:
                     events.append({"market":market,"action":"EXIT_BLOCKED","reason":reason,"blockers":[f"{type(exc).__name__}:{str(exc)[:300]}"]})
                 continue

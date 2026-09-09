@@ -47,11 +47,11 @@ execution_adapter:
 
 swing_canary:
   native_crypto_authority: true
-  maximum_order_eur: 10
-  maximum_total_exposure_eur: 10
-  maximum_positions: 1
-  maximum_new_orders_per_day: 1
-  maximum_risk_per_trade_eur: 1
+  maximum_order_eur: 25
+  maximum_total_exposure_eur: 75
+  maximum_positions: 3
+  maximum_new_orders_per_day: 3
+  maximum_risk_per_trade_eur: 2
   maximum_slippage_bps: 25
   native_exchange_stop_required: true
   autoscale: false

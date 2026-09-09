@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_reference_stack_v1
+schema: crypto_ai_swing_reference_stack_v2
 policy:
   canonical_financial_truth: Sjagil/crypto
   isolated_reference_processes_only: true
@@ -9,91 +9,98 @@ policy:
 references:
   nautilus_trader:
     role: event_driven_replay_and_execution_semantics
-    module: nautilus_trader
+    modules: [nautilus_trader]
     env_aliases: [nautilus, NautilusTrader, nautilus_trader]
     runtime_required: true
+    source_required: false
     live_authority: false
   vectorbt:
     role: vectorized_research_crosscheck
-    module: vectorbt
+    modules: [vectorbt]
     env_aliases: [vectorbt]
     runtime_required: true
+    source_required: false
     live_authority: false
   optuna:
     role: bounded_hyperparameter_search
-    module: optuna
+    modules: [optuna]
     env_aliases: [optuna]
     runtime_required: true
+    source_required: false
     live_authority: false
   skfolio:
     role: portfolio_allocation_challenger
-    module: skfolio
+    modules: [skfolio]
     env_aliases: [skfolio]
     runtime_required: true
+    source_required: false
     live_authority: false
   stable_baselines3_contrib:
-    role: rl_position_management_challenger
-    module: sb3_contrib
+    role: operational_rl_position_management_challenger
+    modules: [sb3_contrib]
     env_aliases: [sb3-contrib, sb3_contrib]
     runtime_required: true
+    source_required: false
     live_authority: false
   kronos:
-    role: isolated_forecast_challenger
-    module: kronos
+    role: source_bound_kline_forecast_challenger
+    modules: [model]
     env_aliases: [kronos, Kronos]
     runtime_required: true
+    source_required: true
     live_authority: false
   finrl_trading:
-    role: rl_benchmark_and_reward_design
-    module: finrl
+    role: rl_environment_and_baseline_design_reference
+    modules: []
     env_aliases: [finrl, FinRL-Trading, FinRL-X, finrl-trading]
-    runtime_required: true
+    runtime_required: false
+    source_required: true
     live_authority: false
   lean:
     role: independent_cross_engine_validation
-    module: null
+    modules: []
     env_aliases: [lean, Lean]
     runtime_required: false
     source_required: true
     live_authority: false
   lean_cli:
-    role: optional_lean_orchestration
-    module: lean
+    role: lean_orchestration_runtime
+    modules: [lean]
     env_aliases: [lean-cli, lean_cli]
-    runtime_required: false
-    source_required: true
+    runtime_required: true
+    source_required: false
     live_authority: false
   moondev:
     role: research_agent_patterns
-    module: null
+    modules: []
     env_aliases: [moondev, MoonDev, MoonDev-Trading-Ai-Agents]
     runtime_required: false
     source_required: true
     live_authority: false
   qlib:
     role: dataset_and_experiment_lifecycle_reference
-    module: qlib
+    modules: [qlib]
     env_aliases: [qlib, Qlib]
     runtime_required: false
     source_required: true
     live_authority: false
   pybroker:
     role: chronological_walk_forward_reference
-    module: pybroker
+    modules: [pybroker]
     env_aliases: [pybroker, PyBroker]
     runtime_required: false
     source_required: true
     live_authority: false
   vnpy:
     role: event_driven_architecture_reference
-    module: vnpy
+    modules: [vnpy]
     env_aliases: [vnpy, VeighNa]
     runtime_required: false
     source_required: true
     live_authority: false
   vnpy_ib:
     role: ib_specific_not_applicable_to_crypto_execution
-    module: vnpy_ib
+    modules: [vnpy_ib]
     env_aliases: [vnpy_ib]
     runtime_required: false
     source_required: false
