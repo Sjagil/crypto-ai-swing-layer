@@ -1,0 +1,101 @@
+schema: crypto_ai_swing_reference_stack_v1
+policy:
+  canonical_financial_truth: Sjagil/crypto
+  isolated_reference_processes_only: true
+  reference_exchange_authority: false
+  reference_live_decision_authority: false
+  reference_outputs_are_challenger_evidence_only: true
+
+references:
+  nautilus_trader:
+    role: event_driven_replay_and_execution_semantics
+    module: nautilus_trader
+    env_aliases: [nautilus, NautilusTrader, nautilus_trader]
+    runtime_required: true
+    live_authority: false
+  vectorbt:
+    role: vectorized_research_crosscheck
+    module: vectorbt
+    env_aliases: [vectorbt]
+    runtime_required: true
+    live_authority: false
+  optuna:
+    role: bounded_hyperparameter_search
+    module: optuna
+    env_aliases: [optuna]
+    runtime_required: true
+    live_authority: false
+  skfolio:
+    role: portfolio_allocation_challenger
+    module: skfolio
+    env_aliases: [skfolio]
+    runtime_required: true
+    live_authority: false
+  stable_baselines3_contrib:
+    role: rl_position_management_challenger
+    module: sb3_contrib
+    env_aliases: [sb3-contrib, sb3_contrib]
+    runtime_required: true
+    live_authority: false
+  kronos:
+    role: isolated_forecast_challenger
+    module: kronos
+    env_aliases: [kronos, Kronos]
+    runtime_required: true
+    live_authority: false
+  finrl_trading:
+    role: rl_benchmark_and_reward_design
+    module: finrl
+    env_aliases: [finrl, FinRL-Trading, FinRL-X, finrl-trading]
+    runtime_required: true
+    live_authority: false
+  lean:
+    role: independent_cross_engine_validation
+    module: null
+    env_aliases: [lean, Lean]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  lean_cli:
+    role: optional_lean_orchestration
+    module: lean
+    env_aliases: [lean-cli, lean_cli]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  moondev:
+    role: research_agent_patterns
+    module: null
+    env_aliases: [moondev, MoonDev, MoonDev-Trading-Ai-Agents]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  qlib:
+    role: dataset_and_experiment_lifecycle_reference
+    module: qlib
+    env_aliases: [qlib, Qlib]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  pybroker:
+    role: chronological_walk_forward_reference
+    module: pybroker
+    env_aliases: [pybroker, PyBroker]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  vnpy:
+    role: event_driven_architecture_reference
+    module: vnpy
+    env_aliases: [vnpy, VeighNa]
+    runtime_required: false
+    source_required: true
+    live_authority: false
+  vnpy_ib:
+    role: ib_specific_not_applicable_to_crypto_execution
+    module: vnpy_ib
+    env_aliases: [vnpy_ib]
+    runtime_required: false
+    source_required: false
+    applicable: false
+    live_authority: false
