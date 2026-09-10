@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
-from crypto_ai_swing.contracts import ModelVote, Signal, Side
+from crypto_ai_swing.contracts import ModelVote, Side, Signal
+from crypto_ai_swing.models.ensemble import ensemble_score
 
 
 def deterministic_score(row: pd.Series) -> tuple[float, str]:
@@ -55,38 +58,38 @@ def build_signal(
     orderflow_score: float | None = None,
     context_entry_blocked: bool = False,
     minimum_entry_score: float = 0.62,
+    minimum_model_probability: float | None = None,
+    ensemble_weights: Mapping[str, float] | None = None,
 ) -> Signal:
     dscore, family = deterministic_score(row)
     votes = [ModelVote("deterministic", dscore, 0.75)]
-    weighted = dscore * 0.60
-    weight = 0.60
 
     if ml_probability is not None and np.isfinite(ml_probability):
-        votes.append(
-            ModelVote("supervised_ml", float(ml_probability), 0.70)
-        )
-        weighted += float(ml_probability) * 0.20
-        weight += 0.20
+        votes.append(ModelVote("supervised_ml", float(ml_probability), 0.70))
     if forecast_score is not None and np.isfinite(forecast_score):
         votes.append(ModelVote("forecast", float(forecast_score), 0.60))
-        weighted += float(forecast_score) * 0.10
-        weight += 0.10
     if rl_score is not None and np.isfinite(rl_score):
         votes.append(ModelVote("rl_challenger", float(rl_score), 0.40))
-        weighted += float(rl_score) * 0.10
-        weight += 0.10
-
     if research_meta_score is not None and np.isfinite(research_meta_score):
         meta = float(np.clip(research_meta_score, 0.0, 1.0))
         votes.append(ModelVote("meta_edge_manager", meta, 0.70))
-        weighted += meta * 0.12
-        weight += 0.12
         if research_strategy_hint:
             family = str(research_strategy_hint)
 
-    score = float(
-        np.clip(weighted / max(weight, 1e-9), 0.0, 1.0)
-    )
+    weights = {
+        "deterministic": 0.45,
+        "supervised_ml": 0.30,
+        "forecast": 0.15,
+        "rl_challenger": 0.10,
+        "meta_edge_manager": 0.12,
+    }
+    if ensemble_weights:
+        for source, value in ensemble_weights.items():
+            selected = float(value)
+            if not np.isfinite(selected) or selected < 0:
+                raise ValueError(f"invalid ensemble weight for {source}: {value}")
+            weights[str(source)] = selected
+    score, ensemble_confidence = ensemble_score(votes, weights)
 
     # Context layers are bounded. They can confirm/veto but cannot create
     # execution authority or bypass the deterministic/cost/risk gates.
@@ -121,9 +124,16 @@ def build_signal(
         )
         score = float(np.clip(score + adjustment, 0.0, 1.0))
 
+    model_probability_ok = (
+        ml_probability is None
+        or not np.isfinite(ml_probability)
+        or minimum_model_probability is None
+        or float(ml_probability) >= float(minimum_model_probability)
+    )
     side = (
         Side.BUY
         if score >= minimum_entry_score
+        and model_probability_ok
         and not nlp_severe_negative
         and not context_entry_blocked
         else Side.HOLD
@@ -144,7 +154,7 @@ def build_signal(
         timestamp=timestamp,
         side=side,
         score=score,
-        confidence=float(np.mean([v.confidence for v in votes])),
+        confidence=float(ensemble_confidence),
         expected_edge_bps=expected_edge_bps,
         stop_pct=stop_pct,
         take_profit_pct=take_profit_pct,

@@ -50,11 +50,12 @@ class SwingPipeline:
     ) -> PipelineResult:
         spread_bps = spread_bps or {}
         market_context = market_context or {}
-        minimum = float(
-            self.settings.swing.get("signals", {}).get(
-                "minimum_entry_score", 0.62
-            )
+        signals_cfg = dict(self.settings.swing.get("signals", {}) or {})
+        minimum = float(signals_cfg.get("minimum_entry_score", 0.62))
+        minimum_model_probability = float(
+            signals_cfg.get("minimum_model_probability", 0.55)
         )
+        ensemble_weights = dict(signals_cfg.get("ensemble", {}) or {})
         signals = []
 
         for market, frame in frames.items():
@@ -94,6 +95,8 @@ class SwingPipeline:
                     or context.get("agent_entry_blocked", False)
                 ),
                 minimum_entry_score=minimum,
+                minimum_model_probability=minimum_model_probability,
+                ensemble_weights=ensemble_weights,
             )
             signals.append(signal)
 

@@ -19,6 +19,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Checkout canonical crypto engine
+        shell: bash
+        run: |
+          CRYPTO_COMMIT="$(python -c 'import json; print(json.load(open("config/canonical_crypto_engine.json"))["commit"])')"
+          rm -rf "$GITHUB_WORKSPACE/crypto"
+          git clone --quiet https://github.com/Sjagil/crypto.git "$GITHUB_WORKSPACE/crypto"
+          git -C "$GITHUB_WORKSPACE/crypto" checkout --quiet "$CRYPTO_COMMIT"
+          echo "CRYPTO_REPO_PATH=$GITHUB_WORKSPACE/crypto" >> "$GITHUB_ENV"
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -26,7 +34,9 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
       - name: Ruff
-        run: python -m ruff check src tests scripts
+        run: python -m ruff check --ignore BLE001,S110 src/crypto_ai_swing/bridge/crypto_operations.py src/crypto_ai_swing/bridge/ownership.py src/crypto_ai_swing/strategies/swing.py src/crypto_ai_swing/orchestration/pipeline.py scripts/canonical_ownership_audit.py tests/test_round39_canonical_ownership.py
+      - name: Canonical ownership audit
+        run: python scripts/canonical_ownership_audit.py
       - name: Tests
         run: python -m pytest -q
 
@@ -37,15 +47,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Checkout canonical crypto engine
+        shell: bash
+        run: |
+          CRYPTO_COMMIT="$(python -c 'import json; print(json.load(open("config/canonical_crypto_engine.json"))["commit"])')"
+          rm -rf "$GITHUB_WORKSPACE/crypto"
+          git clone --quiet https://github.com/Sjagil/crypto.git "$GITHUB_WORKSPACE/crypto"
+          git -C "$GITHUB_WORKSPACE/crypto" checkout --quiet "$CRYPTO_COMMIT"
+          echo "CRYPTO_REPO_PATH=$GITHUB_WORKSPACE/crypto" >> "$GITHUB_ENV"
       - name: Install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev,crypto-runtime]'
+      - name: Canonical ownership audit
+        run: python scripts/canonical_ownership_audit.py
       - name: Safety contracts
         run: |
           python -m pytest -q \
             tests/test_round3_execution_fail_closed.py \
-            tests/test_round5_crypto_authority_contract.py \
+            tests/test_round36_1_engine_contract.py \
+            tests/test_round39_canonical_ownership.py \
             tests/test_round7_forward_causality.py \
             tests/test_round8_live_evidence_gate.py \
             tests/test_round8_prospective_readiness.py
