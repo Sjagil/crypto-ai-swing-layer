@@ -14,9 +14,7 @@ from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.orchestration.supervisor import AutonomousSupervisor
 from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
-from crypto_ai_swing.research.performance_attribution import PerformanceAttributionEngine
 from crypto_ai_swing.research.promotion import ResearchPromotionRegistry
-from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.research.swing_geometry import SwingGeometryEngine
 from crypto_ai_swing.universe.runtime import UniverseManager
 
@@ -51,15 +49,21 @@ class UnifiedAutonomyRuntime:
         self.base = AutonomousSupervisor(settings, mode=self.mode)
         self.universe = UniverseManager(settings)
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
-        self.attribution = PerformanceAttributionEngine(settings, mode=self.mode)
-        self.strategy_lab = StrategyChallengerLab(settings, mode=self.mode)
+        self.attribution = (
+            self.base.chief_agent.strategy_director.attribution
+        )
+        self.strategy_lab = (
+            self.base.chief_agent.strategy_director.strategy_lab
+        )
         self.swing_geometry = SwingGeometryEngine(settings, mode=self.mode)
         self.entry_selector = ProspectiveSwingEntrySelector(
             settings, mode=self.mode
         )
         self.agent_manager = self.base.agent_manager
         self.edge = self.agent_manager.edge_manager
-        self.registry = ResearchPromotionRegistry(settings)
+        self.registry = (
+            self.base.chief_agent.strategy_director.registry
+        )
         self.state = self._load_state()
         self._cycle_id: str | None = None
 

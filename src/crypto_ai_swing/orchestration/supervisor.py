@@ -9,7 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from crypto_ai_swing.agents.manager import AgentManager
+from crypto_ai_swing.agents.chief import ChiefAgent
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.orchestration.proactive import ProactiveTrader
 from crypto_ai_swing.research.bootstrap import ColdStartResearchRunner
@@ -40,7 +40,8 @@ class AutonomousSupervisor:
         )
         self.universe = UniverseManager(settings)
         self.trader = ProactiveTrader(settings, mode=mode)
-        self.agent_manager = AgentManager(settings, mode=mode)
+        self.chief_agent = ChiefAgent(settings, mode=mode)
+        self.agent_manager = self.chief_agent.agent_manager
         self.research = NativeResearchBridge(settings.crypto_repo_root)
         self.bootstrap_research = ColdStartResearchRunner(settings)
         self.operations = NativeOperationsBridge(
@@ -215,7 +216,7 @@ class AutonomousSupervisor:
             })
 
         try:
-            self._task("agent_manager")
+            self._task("chief_agent")
             forward_cfg = dict(
                 (getattr(self.settings, "autonomy", {}) or {}).get(
                     "forward_evidence", {}
@@ -225,15 +226,19 @@ class AutonomousSupervisor:
                 "path",
                 "output/crypto_ai_swing/forward/forward.sqlite",
             )
-            tasks["agent_manager"] = self.agent_manager.cycle(
+            chief_result = self.chief_agent.cycle(
                 markets=list(universe.get("markets") or []),
                 forward_database_path=forward_path,
             )
-            self._last_completed_task = "agent_manager"
+            tasks["chief_agent"] = chief_result
+            tasks["agent_manager"] = dict(
+                chief_result.get("tasks", {}).get("agent_manager", {})
+            )
+            self._last_completed_task = "chief_agent"
         except Exception as exc:
             errors.append(
                 {
-                    "task": "agent_manager",
+                    "task": "chief_agent",
                     "error": f"{type(exc).__name__}: {str(exc)[:500]}",
                 }
             )

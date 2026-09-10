@@ -83,6 +83,12 @@ class NativeOperationsBridge:
                 "legacy_local_bitvavo_migration_pending": False,
                 "canonical_decision_packet_portfolio_route": True,
                 "agent_manager_continuous": True,
+                "chief_agent_continuous": True,
+                "canonical_strategy_research": True,
+                "canonical_browser_research": True,
+                "canonical_exact_backtesting": True,
+                "canonical_walk_forward_validation": True,
+                "canonical_stochastic_validation": True,
             },
         }
 

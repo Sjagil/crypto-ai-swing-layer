@@ -4,7 +4,7 @@ task_heartbeat_seconds: 30
 agent_retrain_seconds: 14400
 economics_refresh_seconds: 21600
 research_run_seconds: 10800
-research_enabled: true
+research_enabled: false
 research_exact: false
 research_maximum_rows: 20000
 state_path: output/crypto_ai_swing/supervisor/state.json
@@ -18,3 +18,6 @@ rl_retrain_seconds: 86400
 
 agent_manager_enabled: true
 agent_manager_check_seconds: 60
+
+chief_agent_enabled: true
+legacy_research_scheduler_delegated_to_chief: true

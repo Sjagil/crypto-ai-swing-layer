@@ -1,4 +1,4 @@
-schema_version: round41_canonical_ownership_v3
+schema_version: round42_canonical_ownership_v4
 canonical_repository: Sjagil/crypto
 application_repository: Sjagil/crypto-ai-swing-layer
 fail_closed: true

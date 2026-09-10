@@ -51,6 +51,7 @@ from crypto_ai_swing.quant.bayesian_forward import (
     persist as persist_bayesian_forward,
 )
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
+from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
 
 
@@ -245,6 +246,11 @@ class ProactiveTrader:
         self.rl = RLRuntime(settings)
         self.cmc_context = CMCContextCollector(settings)
         self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
+        self.strategy_lab = StrategyChallengerLab(
+            settings,
+            mode="shadow" if self.mode == "live" else self.mode,
+        )
+        self.edge_manager.strategy_lab = self.strategy_lab
         self.execution_authority = CryptoAuthorityAdapter(settings.crypto_repo_root)
         self.production_guard = LiveExecutionGuard(
             settings, self.execution_authority
@@ -649,7 +655,8 @@ class ProactiveTrader:
             }
 
     def _sync_live_positions(self, markets: list[str]) -> None:
-        if self.mode != "live": return
+        if self.mode != "live":
+            return
         try:
             guard = getattr(self, "production_guard", None)
             if guard is not None:
@@ -658,25 +665,26 @@ class ProactiveTrader:
                 if not bool(reconciliation.get("ready")):
                     return
             else:
-                self.execution_authority.reconcile(markets)
-            canonical = dict(
-                self.execution_authority.portfolio().get("positions") or {}
+                reconciliation = self.execution_authority.reconcile(markets)
+                if str(reconciliation.get("status") or "").upper() != "READY":
+                    return
+            rows = list(
+                dict(
+                    self.execution_authority.portfolio().get("positions")
+                    or {}
+                ).values()
             )
+            canonical_markets = {
+                str(row.get("market") or "").upper()
+                for row in rows
+                if isinstance(row, dict) and row.get("market")
+            }
         except Exception:
             return
         local = self.state.positions()
         for market in list(local):
-            if market not in canonical: self.state.delete_position(market)
-        for market,row in canonical.items():
-            try:
-                amount=Decimal(str(row.get("quantity") or "0"));entry=Decimal(str(row.get("entry_price") or "0"))
-                stop=float(row.get("stop_pct") or .02);take=float(row.get("take_profit_pct") or max(.025,3*stop))
-                trailing=float(row.get("trailing_stop_pct") or max(.008,1.2*stop))
-            except Exception:  # noqa: S112
-                continue
-            if amount<=0 or entry<=0: continue
-            existing=local.get(market);highest=max(existing.highest_price,entry) if existing else entry
-            self.state.upsert_position(Position(market,amount,entry,highest,stop,take,trailing,str(row.get("opened_at") or datetime.now(UTC).isoformat())))
+            if market not in canonical_markets:
+                self.state.delete_position(market)
 
     def _record_simulated_position(self, intent: TradeIntent, execution: dict[str, Any], frame: pd.DataFrame) -> None:
         if self.mode == "live" or execution.get("accepted") is not True: return
@@ -707,6 +715,53 @@ class ProactiveTrader:
                     "attribution_schema": "paper_intent_context_v1",
                 },
             )
+
+    def _record_position_after_execution(
+        self,
+        intent: TradeIntent,
+        execution: dict[str, Any],
+        frame: pd.DataFrame,
+    ) -> None:
+        if execution.get("accepted") is not True:
+            return
+        if self.mode != "live":
+            self._record_simulated_position(intent, execution, frame)
+            return
+        canonical = dict(execution.get("canonical_result") or execution)
+        order = dict(canonical.get("order") or {})
+        try:
+            amount = Decimal(
+                str(
+                    order.get("filled_quantity")
+                    or order.get("filledAmount")
+                    or order.get("quantity")
+                    or "0"
+                )
+            )
+            price = Decimal(
+                str(
+                    order.get("average_price")
+                    or order.get("averagePrice")
+                    or order.get("price")
+                    or frame["close"].iloc[-1]
+                )
+            )
+        except Exception:
+            return
+        if amount <= 0 or price <= 0:
+            return
+        self.state.upsert_position(
+            Position(
+                intent.market,
+                amount,
+                price,
+                price,
+                intent.stop_pct,
+                intent.take_profit_pct,
+                intent.trailing_stop_pct,
+                datetime.now(UTC).isoformat(),
+            )
+        )
 
     def _manage_exits(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -760,6 +815,35 @@ class ProactiveTrader:
             elif highest > pos.entry_price and price <= trailing:
                 reason = "TRAILING_STOP"
             if not reason:
+                continue
+            if self.mode == "live" and reason == "STOP_LOSS":
+                try:
+                    guard = getattr(self, "production_guard", None)
+                    if guard is None:
+                        raise RuntimeError("PRODUCTION_GUARD_NOT_INITIALIZED")
+                    reconciliation = guard.reconcile(self._markets())
+                    self._last_live_reconciliation = reconciliation
+                    self._sync_live_positions([market])
+                    events.append(
+                        {
+                            "market": market,
+                            "action": "LIVE_NATIVE_STOP_MONITOR",
+                            "reason": "NATIVE_STOP_LOSS",
+                            "reconciliation": reconciliation,
+                            "duplicate_market_sell_submitted": False,
+                        }
+                    )
+                except Exception as exc:
+                    events.append(
+                        {
+                            "market": market,
+                            "action": "NATIVE_STOP_MONITOR_BLOCKED",
+                            "reason": "STOP_LOSS",
+                            "blockers": [
+                                f"{type(exc).__name__}:{str(exc)[:300]}"
+                            ],
+                        }
+                    )
                 continue
             if self.mode == "live":
                 try:
@@ -1294,7 +1378,7 @@ class ProactiveTrader:
             execution = self._execute_buy(intent)
             self.state.mark(intent.market, candle_ts, "BUY", {"intent": intent.to_dict(), "execution": execution})
             executions.append({"intent": intent.to_dict(), "execution": execution})
-            self._record_simulated_position(intent, execution, frame)
+            self._record_position_after_execution(intent, execution, frame)
             if (
                 execution.get("accepted") is True
                 and intent.market not in positions_for_execution

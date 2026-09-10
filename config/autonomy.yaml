@@ -172,3 +172,59 @@ entry_selector:
   paper_shadow_influence_only_after_qualification: true
   live_decision_influence: false
   automatic_live_promotion: false
+chief_agent:
+  enabled: true
+  cycle_seconds: 60
+  continuous_improvement: true
+  agent_of_agents: true
+  automatic_live_authority: false
+  automatic_live_promotion: false
+  improvement_objective: prospective_net_after_costs
+performance_governor:
+  enabled: true
+  refresh_seconds: 900
+  maximum_research_drawdown: 0.25
+  require_oos_net_improvement: true
+  require_stressed_cost_improvement: true
+  require_stochastic_validation: true
+  require_multiple_testing_control: true
+  require_point_in_time_universe: true
+  threshold_relaxation_is_not_improvement: true
+strategy_director:
+  enabled: true
+  attribution_seconds: 900
+  strategy_lab_seconds: 3600
+  dna_factory_seconds: 21600
+  native_tournament_seconds: 21600
+  factory_stage0_seconds: 21600
+  exact_research_seconds: 86400
+  strategy_dna_trials: 2000
+  maximum_research_rows: 20000
+  maximum_new_hypotheses_per_cycle: 6
+  cold_start_timeframe: 1h
+  cold_start_final_holdout_shortlist_size: 5
+  cold_start_fallback_required: true
+  continuous_candidate_generation: true
+  canonical_exact_backtest: true
+  canonical_walk_forward: true
+  canonical_stochastic_validation: true
+  automatic_live_promotion: false
+external_research:
+  enabled: true
+  refresh_seconds: 900
+  include_rss: true
+  playwright_fallback: true
+  maximum_evidence_records: 250
+  maximum_summary_chars: 2000
+  raw_external_content_is_untrusted: true
+  external_text_has_instruction_authority: false
+  direct_exchange_access: false
+live_lifecycle:
+  enabled: true
+  canonical_execution_only: true
+  native_stop_required_after_fill: true
+  monitor_native_stop_without_duplicate_market_sell: true
+  take_profit_uses_canonical_exit: true
+  trailing_stop_uses_canonical_exit: true
+  post_submit_reconciliation_required: true
+  automatic_live_authority: false

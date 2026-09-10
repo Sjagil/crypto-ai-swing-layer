@@ -135,7 +135,7 @@ def audit_source_ownership(project_root: Path) -> dict[str, Any]:
                 else:
                     violations.append({**row, "reason": "DUPLICATED_CANONICAL_IMPLEMENTATION"})
     return {
-        "schema_version": "round41_canonical_ownership_audit_v1",
+        "schema_version": "round42_canonical_ownership_audit_v1",
         "ready": not violations,
         "canonical_repository": contract.canonical_repository,
         "application_repository": contract.application_repository,

@@ -1,0 +1,44 @@
+name: round42-ci
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - feature/production-canonical-runtime-v2-42
+
+jobs:
+  round42:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Checkout pinned canonical crypto
+        shell: bash
+        run: |
+          CRYPTO_COMMIT="$(python -c 'import json; print(json.load(open("config/canonical_crypto_engine.json"))["commit"])')"
+          git clone --quiet https://github.com/Sjagil/crypto.git "$GITHUB_WORKSPACE/crypto"
+          git -C "$GITHUB_WORKSPACE/crypto" checkout --quiet "$CRYPTO_COMMIT"
+          echo "CRYPTO_REPO_PATH=$GITHUB_WORKSPACE/crypto" >> "$GITHUB_ENV"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,crypto-runtime]'
+      - name: Round42 contracts
+        run: |
+          python -m compileall -q src tests scripts
+          python -m pytest -q \
+            tests/test_round42_performance_governor.py \
+            tests/test_round42_external_research_contract.py \
+            tests/test_round42_strategy_director_contract.py \
+            tests/test_round42_live_lifecycle.py \
+            tests/test_round42_quant_foundation.py \
+            tests/test_round42_edge_semantics.py \
+            tests/test_round42_chief_contract.py \
+            tests/test_round42_proactive_lifecycle_contract.py
+            tests/test_round42_cold_start_fallback.py
+          python -m pytest -q
