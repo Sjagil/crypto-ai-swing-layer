@@ -48,15 +48,15 @@ class QuantFoundationAudit:
         return {
             "schema_version": self.SCHEMA,
             "generated_at": datetime.now(UTC).isoformat(),
-            "ready": bool(
-                research.ready and operations.get("ready") and not missing
-            ),
+            "ready": bool(operations.get("ready") and not missing),
             "required_research_modules": sorted(
                 REQUIRED_NATIVE_RESEARCH_MODULES
             ),
             "missing_research_modules": missing,
             "native_research": {
                 "ready": research.ready,
+                "required_scope_ready": not missing,
+                "catalog_ready": research.ready,
                 "imported_modules": research.imported_modules,
                 "required_modules": research.required_modules,
                 "promotion_states": list(research.promotion_states),

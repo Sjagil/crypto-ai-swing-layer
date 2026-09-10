@@ -9,6 +9,8 @@ def test_round42_quant_foundation_uses_pinned_canonical_crypto():
     payload = QuantFoundationAudit(settings).run()
     assert payload["ready"] is True
     assert payload["missing_research_modules"] == []
+    assert payload["native_research"]["required_scope_ready"] is True
+    assert "catalog_ready" in payload["native_research"]
     assert payload["contracts"]["canonical_kelly"] is True
     assert payload["contracts"]["canonical_backtester"] is True
     assert payload["contracts"]["canonical_walk_forward"] is True

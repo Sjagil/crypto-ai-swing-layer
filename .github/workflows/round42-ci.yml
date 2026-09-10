@@ -39,6 +39,6 @@ jobs:
             tests/test_round42_quant_foundation.py \
             tests/test_round42_edge_semantics.py \
             tests/test_round42_chief_contract.py \
-            tests/test_round42_proactive_lifecycle_contract.py
+            tests/test_round42_proactive_lifecycle_contract.py \
             tests/test_round42_cold_start_fallback.py
           python -m pytest -q
