@@ -28,7 +28,6 @@ from .data.provider_semantics import (
     aggregate_provider_semantics,
 )
 from .data.quality import aggregate_quality, audit_ohlcv_frame
-from .execution.bitvavo import live_gate_status
 from .execution.crypto_authority import CryptoAuthorityAdapter
 from .execution.paper_certification import certify_paper_lifecycle
 from .intelligence.crypto_news import CryptoNewsCollector
@@ -533,27 +532,36 @@ def shadow(
 
 @app.command("live-preflight")
 def live_preflight() -> None:
-    """Check live gates without placing an order."""
+    # Check canonical Sjagil/crypto live authority without placing an order.
     s = _settings()
-    status = live_gate_status(s.execution)
-    extra = []
+    blockers: list[str] = []
     try:
         bridge = CryptoLibraryBridge(s.crypto_repo_root)
         library = bridge.integration_status()
         if not library.get("ready"):
-            extra.append("CRYPTO_LIBRARY_NOT_READY")
+            blockers.append("CRYPTO_LIBRARY_NOT_READY")
         if not bridge.execution_authority_interfaces():
-            extra.append("CRYPTO_EXECUTION_AUTHORITY_INTERFACE_MISSING")
-    except Exception:
-        extra.append("CRYPTO_LIBRARY_IMPORT_FAILED")
-    blockers = list(status.blockers) + extra
-    console.print(
+            blockers.append("CRYPTO_EXECUTION_AUTHORITY_INTERFACE_MISSING")
+    except Exception as exc:
+        blockers.append(
+            "CRYPTO_LIBRARY_IMPORT_FAILED:"
+            f"{type(exc).__name__}:{str(exc)[:300]}"
+        )
+
+    canonical_gate = CryptoAuthorityAdapter(s.crypto_repo_root).gate_status()
+    blockers.extend(str(v) for v in canonical_gate.get("blockers", []))
+    console.print_json(
         json.dumps(
-            {"ready": not blockers, "blockers": blockers},
-            indent=2,
+            {
+                "ready": not blockers,
+                "blockers": list(dict.fromkeys(blockers)),
+                "execution_backend": "Sjagil/crypto:core.swing_layer_live",
+                "canonical_authority": canonical_gate,
+                "orders_submitted": 0,
+            },
+            default=str,
         )
     )
-
 
 @app.command()
 def nlp(text: str) -> None:

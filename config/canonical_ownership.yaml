@@ -1,0 +1,41 @@
+schema_version: round40_canonical_ownership_v2
+canonical_repository: Sjagil/crypto
+application_repository: Sjagil/crypto-ai-swing-layer
+fail_closed: true
+
+crypto_owned:
+  - market_data_transport
+  - canonical_candles
+  - provider_normalization
+  - account_state
+  - reconciliation
+  - exchange_transport
+  - trading_math
+  - kelly_math
+  - transaction_cost_model
+  - portfolio_risk
+  - correlation_risk
+  - position_sizing
+  - shariah_market_eligibility
+  - live_execution
+  - protective_exits
+  - kill_switch
+
+swing_owned:
+  - feature_engineering
+  - model_training
+  - model_calibration
+  - model_registry
+  - agent_development
+  - agent_orchestration
+  - strategy_research
+  - quant_research
+  - prospective_validation
+  - market_intelligence_fusion
+  - decision_generation
+  - performance_attribution
+  - retraining
+  - champion_challenger_management
+
+# Round 40 complete: canonical Sjagil/crypto owns exchange transport.
+legacy_migration_exceptions: []

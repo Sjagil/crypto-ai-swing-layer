@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from datetime import datetime, timezone
 import json
 import subprocess
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 from crypto_ai_swing.contracts import Authority, TradeIntent
-from crypto_ai_swing.execution.bitvavo import live_gate_status
+from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,9 @@ class ExecutionRouter:
         self.config = config
 
     def _intent_dir(self) -> Path:
-        rel = self.config.get("execution_adapter", {}).get("intent_directory", "output/crypto_ai_swing/trade_intents")
+        rel = self.config.get("execution_adapter", {}).get(
+            "intent_directory", "output/crypto_ai_swing/trade_intents"
+        )
         return self.crypto_repo_root / rel
 
     def write_intent(self, intent: TradeIntent) -> Path:
@@ -38,8 +40,7 @@ class ExecutionRouter:
         return path
 
     def route(self, intent: TradeIntent, mode: str = "shadow") -> RouteResult:
-        now = datetime.now(timezone.utc)
-        if intent.expires_at <= now:
+        if intent.expires_at <= datetime.now(UTC):
             return RouteResult(False, mode, blocker="INTENT_EXPIRED")
         path = self.write_intent(intent)
         if mode == "shadow":
@@ -51,71 +52,42 @@ class ExecutionRouter:
             if not execution.get("paper_enabled", True):
                 return RouteResult(False, mode, path=path, blocker="PAPER_DISABLED")
             command = adapter.get("command", [])
-        elif mode == "live":
-            if intent.authority != Authority.LIVE:
-                return RouteResult(False, mode, path=path, blocker="INTENT_NOT_LIVE")
-            if not execution.get("live_enabled", False):
-                return RouteResult(False, mode, path=path, blocker="LIVE_DISABLED")
-            gate = live_gate_status(self.config)
-            if not gate.ready:
-                return RouteResult(False, mode, path=path, blocker=";".join(gate.blockers))
-            if str(adapter.get("mode", "file_contract")) == "direct_bitvavo":
-                return RouteResult(
-                    False,
-                    mode,
-                    path=path,
-                    blocker="DIRECT_BITVAVO_EXECUTION_DISABLED_USE_CRYPTO_AUTHORITY",
-                )
-            if str(adapter.get("mode", "file_contract")) == "crypto_execution_authority":
-                native_bridge = (
-                    self.crypto_repo_root / "core" / "swing_layer_live.py"
-                )
-                if not native_bridge.is_file():
-                    return RouteResult(
-                        False,
-                        mode,
-                        path=path,
-                        blocker="CRYPTO_EXECUTION_AUTHORITY_SUBMISSION_NOT_MAPPED",
-                    )
-                from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
-                try:
-                    result = CryptoAuthorityAdapter(
-                        self.crypto_repo_root
-                    ).submit_buy(intent)
-                except Exception as exc:
-                    return RouteResult(
-                        False,
-                        mode,
-                        path=path,
-                        blocker=(
-                            "CRYPTO_EXECUTION_AUTHORITY_UNAVAILABLE:"
-                            f"{type(exc).__name__}:{str(exc)[:300]}"
-                        ),
-                    )
-                return RouteResult(
-                    result.accepted,
-                    mode,
-                    path=path,
-                    blocker=(
-                        None
-                        if result.accepted
-                        else ";".join(
-                            str(x)
-                            for x in result.payload.get("blockers", [])
-                        )
-                        or str(
-                            result.payload.get("status")
-                            or "CRYPTO_AUTHORITY_BLOCKED"
-                        )
-                    ),
-                    response=result.payload,
-                )
-            command = adapter.get("live_command", [])
-        else:
-            return RouteResult(False, mode, path=path, blocker="UNKNOWN_MODE")
+            if not command:
+                return RouteResult(False, mode, path=path, blocker="EXTERNAL_ADAPTER_NOT_CONFIGURED")
+            rendered = [str(token).replace("{intent}", str(path)) for token in command]
+            proc = subprocess.run(rendered, cwd=self.crypto_repo_root, shell=False, check=False, timeout=120)
+            return RouteResult(proc.returncode == 0, mode, path=path, return_code=proc.returncode)
 
-        if not command:
-            return RouteResult(False, mode, path=path, blocker="EXTERNAL_ADAPTER_NOT_CONFIGURED")
-        rendered = [str(token).replace("{intent}", str(path)) for token in command]
-        proc = subprocess.run(rendered, cwd=self.crypto_repo_root, shell=False, check=False, timeout=120)
-        return RouteResult(proc.returncode == 0, mode, path=path, return_code=proc.returncode)
+        if mode != "live":
+            return RouteResult(False, mode, path=path, blocker="UNKNOWN_MODE")
+        if intent.authority != Authority.LIVE:
+            return RouteResult(False, mode, path=path, blocker="INTENT_NOT_LIVE")
+        if not execution.get("live_enabled", False):
+            return RouteResult(False, mode, path=path, blocker="LIVE_DISABLED")
+
+        adapter_mode = str(adapter.get("mode", "file_contract"))
+        if adapter_mode == "direct_bitvavo":
+            return RouteResult(False, mode, path=path, blocker="DIRECT_BITVAVO_EXECUTION_REMOVED_USE_CRYPTO_AUTHORITY")
+        if adapter_mode != "crypto_execution_authority":
+            return RouteResult(False, mode, path=path, blocker="CANONICAL_CRYPTO_EXECUTION_AUTHORITY_REQUIRED")
+
+        authority = CryptoAuthorityAdapter(self.crypto_repo_root)
+        try:
+            preflight = authority.preflight(intent)
+        except Exception as exc:
+            return RouteResult(False, mode, path=path, blocker=f"CRYPTO_EXECUTION_PREFLIGHT_UNAVAILABLE:{type(exc).__name__}:{str(exc)[:300]}")
+        if preflight.get("accepted") is not True:
+            blockers = [str(v) for v in preflight.get("blockers", []) if str(v)]
+            return RouteResult(False, mode, path=path, blocker=";".join(blockers) or "CRYPTO_AUTHORITY_PREFLIGHT_BLOCKED", response={"canonical_preflight": preflight})
+        try:
+            result = authority.submit_buy(intent)
+        except Exception as exc:
+            return RouteResult(False, mode, path=path, blocker=f"CRYPTO_EXECUTION_AUTHORITY_UNAVAILABLE:{type(exc).__name__}:{str(exc)[:300]}", response={"canonical_preflight": preflight})
+        blockers = [str(v) for v in result.payload.get("blockers", []) if str(v)]
+        return RouteResult(
+            result.accepted,
+            mode,
+            path=path,
+            blocker=None if result.accepted else ";".join(blockers) or str(result.payload.get("status") or result.payload.get("reason_code") or "CRYPTO_AUTHORITY_BLOCKED"),
+            response={"canonical_preflight": preflight, "canonical_submission": result.payload},
+        )

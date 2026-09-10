@@ -23,10 +23,6 @@ from crypto_ai_swing.execution.active_swing_canary import (
     canonical_preflight_explicitly_denied,
     execution_validation_canary_config,
 )
-from crypto_ai_swing.execution.bitvavo import (
-    BitvavoError,
-    BitvavoREST,
-)
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
 from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.cmc_context import CMCContextCollector
@@ -223,11 +219,8 @@ class ProactiveTrader:
         )
         self.nlp = NLPMarketEngine(settings.nlp)
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
-        # Direct REST is retained only for the already-existing private
-        # account preflight/bootstrap. Round 2 market data is sourced from
-        # Sjagil/crypto. Live order submission is intentionally disabled
-        # until core.execution_authority is mapped exactly.
-        self.client = BitvavoREST()
+        # Exchange/account truth is owned by Sjagil/crypto.
+        # No Bitvavo transport is instantiated in the swing application.
         news_cfg = settings.autonomy.get("news", {}) if hasattr(settings, "autonomy") else {}
         self.news_collector = CryptoNewsCollector(
             self.crypto,
@@ -265,7 +258,6 @@ class ProactiveTrader:
     def close(self):
         self.state.close()
         self.forward.close()
-        self.client.close()
         guard = getattr(self, "production_guard", None)
         if guard is not None:
             guard.close()
@@ -374,87 +366,40 @@ class ProactiveTrader:
     def _account(
         self, markets: list[str]
     ) -> tuple[Decimal, Decimal, Decimal]:
-        if self.mode == "live":
-            authority = getattr(self, "execution_authority", None)
-            if authority is not None:
-                try:
-                    snapshot = authority.account_snapshot(markets)
-                except BitvavoError:
-                    raise
-                except Exception as exc:
-                    raise BitvavoError(
-                        "Canonical crypto account snapshot unavailable: "
-                        f"{type(exc).__name__}: {str(exc)[:300]}"
-                    ) from exc
-                if snapshot.get("status") != "READY":
-                    raise BitvavoError(
-                        "Canonical crypto account health is not READY: "
-                        + ",".join(
-                            str(x) for x in snapshot.get("failures", [])
-                        )
-                    )
-                return (
-                    Decimal(str(snapshot.get("equity_eur") or "0")),
-                    Decimal(str(snapshot.get("cash_eur") or "0")),
-                    Decimal(str(snapshot.get("exposure_eur") or "0")),
-                )
-            # Compatibility/fail-closed path for tests or partially
-            # constructed instances. Production __init__ installs the native
-            # execution authority adapter.
         if not self._private_account_enabled():
             if self.mode in {"shadow", "paper"}:
                 return self._simulated_portfolio_account()
             return self._fallback_account()
-        if not self.client.api_key or not self.client.api_secret:
+
+        authority = getattr(self, "execution_authority", None)
+        if authority is None:
             if self.mode == "live":
-                raise BitvavoError(
-                    "Private Bitvavo credentials are required in live mode"
-                )
-            return self._fallback_account()
+                raise RuntimeError("CANONICAL_CRYPTO_ACCOUNT_AUTHORITY_MISSING")
+            return self._simulated_portfolio_account()
+
         try:
-            balances = self.client.balances()
-        except BitvavoError:
+            snapshot = authority.account_snapshot(markets)
+        except Exception as exc:
             if self.mode == "live":
-                raise
-            return self._fallback_account()
-        by_symbol = {
-            str(x.get("symbol")): (
-                Decimal(str(x.get("available", "0")))
-                + Decimal(str(x.get("inOrder", "0")))
-            )
-            for x in balances
-        }
-        cash = by_symbol.get("EUR", Decimal(0))
-        equity = cash
-        exposure = Decimal(0)
-        for market in markets:
-            base = market.split("-", 1)[0]
-            amount = by_symbol.get(base, Decimal(0))
-            if amount <= 0:
-                continue
-            try:
-                bundle = self.crypto.market_bundle(
-                    market,
-                    "1h",
-                    mode=self.mode,
-                    persist=False,
-                    depth=5,
-                )
-                price = Decimal(
-                    str(bundle.microstructure.get("best_bid") or "0")
-                )
-            except Exception:
-                price = Decimal(0)
-            value = amount * price
-            equity += value
-            exposure += value
-        if equity <= 0:
+                raise RuntimeError(
+                    "Canonical crypto account snapshot unavailable: "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                ) from exc
+            return self._simulated_portfolio_account()
+
+        if snapshot.get("status") != "READY":
             if self.mode == "live":
-                raise BitvavoError(
-                    "Authenticated Bitvavo account returned no usable equity"
+                raise RuntimeError(
+                    "Canonical crypto account health is not READY: "
+                    + ",".join(str(v) for v in snapshot.get("failures", []))
                 )
-            return self._fallback_account()
-        return equity, cash, exposure
+            return self._simulated_portfolio_account()
+
+        return (
+            Decimal(str(snapshot.get("equity_eur") or "0")),
+            Decimal(str(snapshot.get("cash_eur") or "0")),
+            Decimal(str(snapshot.get("exposure_eur") or "0")),
+        )
 
     def _news(self):
         now = time.time()

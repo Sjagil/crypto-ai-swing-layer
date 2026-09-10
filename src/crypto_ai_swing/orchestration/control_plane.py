@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,7 +8,6 @@ from typing import Any
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.bridge.native_foundation import NativeFoundationBridge
-from crypto_ai_swing.execution.bitvavo import live_gate_status
 from crypto_ai_swing.execution.crypto_authority import (
     CryptoAuthorityAdapter,
 )
@@ -354,10 +352,11 @@ class ModeController:
                     )
                 )
 
+            authority_adapter = CryptoAuthorityAdapter(
+                self.settings.crypto_repo_root
+            )
             try:
-                authority = CryptoAuthorityAdapter(
-                    self.settings.crypto_repo_root
-                ).authority_status()
+                authority = authority_adapter.authority_status()
             except Exception as exc:
                 authority = {
                     "active": False,
@@ -394,56 +393,34 @@ class ModeController:
             if not native_execution_ready:
                 blockers.append("NATIVE_EXECUTION_ENVIRONMENT_NOT_READY")
 
-            execution_environment = (
-                os.getenv(
-                    "CRYPTO_SWING_CANARY_EXECUTE",
-                    "",
+            canonical_authority_blockers: list[str] = []
+            if not authority_active:
+                canonical_authority_blockers.append(
+                    "NATIVE_CANARY_AUTHORITY_NOT_ACTIVE"
                 )
-                == "YES"
-            )
+            if not authority_state_ready:
+                canonical_authority_blockers.append(
+                    "NATIVE_CANARY_STATE_NOT_READY"
+                )
+            if not native_execution_ready:
+                canonical_authority_blockers.append(
+                    "NATIVE_EXECUTION_ENVIRONMENT_NOT_READY"
+                )
+            live_gate_payload = {
+                "ready": not canonical_authority_blockers,
+                "blockers": canonical_authority_blockers,
+                "backend": "Sjagil/crypto:core.swing_layer_live",
+                "canonical": authority,
+                "orders_generated": 0,
+                "orders_submitted": 0,
+            }
             checks.append(
                 {
-                    "check": "explicit_execution_environment",
-                    "passed": execution_environment,
+                    "check": "canonical_crypto_live_authority",
+                    "passed": bool(live_gate_payload.get("ready")),
                 }
             )
-            if not execution_environment:
-                blockers.append(
-                    "CANARY_EXECUTION_ENV_NOT_READY"
-                )
-
-            try:
-                gate = live_gate_status(
-                    getattr(self.settings, "execution", {}) or {}
-                )
-                live_gate_payload = {
-                    "ready": gate.ready,
-                    "blockers": list(gate.blockers),
-                }
-            except Exception as exc:
-                live_gate_payload = {
-                    "ready": False,
-                    "blockers": [
-                        "LIVE_GATE_"
-                        + type(exc).__name__.upper()
-                    ],
-                }
-
-            checks.append(
-                {
-                    "check": "swing_layer_live_gate",
-                    "passed": bool(
-                        live_gate_payload.get("ready")
-                    ),
-                }
-            )
-            if not bool(live_gate_payload.get("ready")):
-                blockers.extend(
-                    str(value)
-                    for value in live_gate_payload.get(
-                        "blockers", []
-                    )
-                )
+            blockers.extend(canonical_authority_blockers)
 
         blockers = list(dict.fromkeys(blockers))
         return {
