@@ -10,12 +10,19 @@
     "config.settings",
     "core.autonomous_live",
     "core.event_driven_live",
+    "core.economics",
+    "core.live_asset_preflight",
     "data.data_loader",
     "execution.execution",
+    "notifications.telegram",
     "portfolio.active_allocator",
     "research.features",
+    "research.trading_math",
+    "risk.correlation_analyzer",
+    "risk.risk_manager",
     "scrapers.intelligence"
   ],
   "runtime_root_source": "Settings.crypto_repo_root",
-  "schema_version": "canonical_crypto_engine_lock_v1"
+  "schema_version": "canonical_crypto_engine_lock_v2",
+  "ownership_contract": "config/canonical_ownership.yaml"
 }
