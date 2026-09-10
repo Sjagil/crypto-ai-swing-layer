@@ -28,6 +28,7 @@ from crypto_ai_swing.research.net_edge_calibration import NetEdgeCalibrator
 from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.research.swing_geometry import SwingGeometryEngine
 from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
+from crypto_ai_swing.research.selector_runtime import ProspectiveSelectorRuntime
 
 
 def _net_costs(settings) -> tuple[float, float]:
@@ -107,6 +108,9 @@ class ResearchEdgeManager:
         self.swing_geometry = SwingGeometryEngine(settings, mode=mode)
         self.entry_selector = ProspectiveSwingEntrySelector(
             settings, mode=mode
+        )
+        self.selector_runtime = ProspectiveSelectorRuntime(
+            settings, selector=self.entry_selector, mode=mode
         )
 
     def _read_latest(self) -> dict[str, Any]:
@@ -535,11 +539,15 @@ class ResearchEdgeManager:
         )
         passes_geometry = geometry_gate.get("passes") is True
         selector_engine = getattr(self, "entry_selector", None)
-        selector_gate = (
-            selector_engine.evaluate_context(context)
-            if selector_engine is not None
-            else {"status": "COLLECTING", "passes": False}
-        )
+        selector_runtime = getattr(self, "selector_runtime", None)
+        if selector_runtime is not None:
+            selector_gate = selector_runtime.evaluate_context(context)
+        else:
+            selector_gate = (
+                selector_engine.evaluate_context(context)
+                if selector_engine is not None
+                else {"status": "COLLECTING", "passes": False}
+            )
         passes_selector = selector_gate.get("passes") is True
         signal_score = (
             score

@@ -157,6 +157,11 @@ entry_selector:
   maximum_selection_fraction: 0.45
   minimum_return_direction_bootstrap_cosine_median: 0.55
   minimum_feature_coverage: 0.6
+  runtime_minimum_feature_coverage: 0.6
+  runtime_maximum_policy_age_seconds: 3600
+  runtime_require_canonical_context: true
+  runtime_require_core_sections: true
+  runtime_ledger_path: output/crypto_ai_swing/research/entry_selector/runtime_decisions.sqlite
   ridge: 1.0
   maximum_factors: 8
   bootstrap_draws: 3000
