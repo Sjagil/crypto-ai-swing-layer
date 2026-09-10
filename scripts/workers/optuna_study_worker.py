@@ -5,8 +5,9 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import optuna
 from optuna.trial import TrialState
@@ -74,8 +75,11 @@ class StudyLock:
                     if age > self.stale_seconds:
                         self.path.unlink(missing_ok=True)
                         continue
-                except Exception:
-                    pass
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    time.sleep(0.05)
+                    continue
                 time.sleep(0.05)
                 continue
             else:
@@ -311,7 +315,7 @@ def main() -> int:
     try:
         request = _read(Path(args.request))
         payload = handle(request)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - worker boundary serializes failures
         _write(
             response_path,
             ok=False,

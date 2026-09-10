@@ -5,8 +5,9 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -46,8 +47,8 @@ def _python_candidates(project_root: Path) -> list[Path]:
             (((payload.get("references") or {}).get("optuna") or {}).get("isolated_env"))
             or declared
         )
-    except Exception:
-        pass
+    except (OSError, AttributeError, TypeError, yaml.YAMLError):
+        declared = ".venvs/optuna"
 
     declared_path = Path(declared).expanduser()
     env_candidates: list[Path] = []
@@ -101,7 +102,7 @@ def _probe_python(path: Path) -> dict[str, Any]:
         payload = json.loads(proc.stdout.strip())
         version = str(payload.get("version") or "")
         major = int(version.split(".", 1)[0])
-    except Exception as exc:
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
         return {
             "ready": False,
             "python": str(path),

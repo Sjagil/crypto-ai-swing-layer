@@ -4,11 +4,12 @@ import hashlib
 import json
 import math
 import time
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -17,7 +18,6 @@ from crypto_ai_swing.research.entry_selector import (
     ProspectiveSwingEntrySelector,
 )
 from crypto_ai_swing.research.optuna_runtime import OptunaStudyRuntime
-
 
 OBJECTIVE_VERSION = "prospective_selector_nested_temporal_v2_complete_horizons"
 
@@ -91,7 +91,7 @@ def _summary(values: Iterable[float]) -> dict[str, float | int | None]:
     gross_profit = float(winners.sum()) if len(winners) else 0.0
     gross_loss = abs(float(losers.sum())) if len(losers) else 0.0
     return {
-        "observations": int(len(arr)),
+        "observations": len(arr),
         "mean_bps": float(arr.mean()),
         "positive_fraction": float(np.mean(arr > 0.0)),
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else None,
@@ -580,7 +580,7 @@ class SelectorOptunaTuner:
                         "state": told.get("status"),
                     }
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - each trial fails closed independently
                 self.runtime.fail(
                     study_name=study_name,
                     contract_hash=contract_hash,
