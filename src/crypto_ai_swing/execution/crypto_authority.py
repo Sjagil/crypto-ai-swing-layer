@@ -6,6 +6,7 @@ from typing import Any
 
 from crypto_ai_swing.contracts import TradeIntent
 
+
 @dataclass(frozen=True)
 class NativeAuthorityResult:
     accepted: bool
@@ -18,7 +19,8 @@ class CryptoAuthorityAdapter:
         self.root = Path(crypto_repo_root).expanduser().resolve()
 
     def _module(self):
-        import importlib, sys
+        import importlib
+        import sys
         root = str(self.root)
         if root not in sys.path:
             sys.path.insert(0, root)
@@ -48,6 +50,45 @@ class CryptoAuthorityAdapter:
 
     def authority_status(self) -> dict[str, Any]:
         return self._module().swing_layer_authority_status()
+
+    def gate_status(self) -> dict[str, Any]:
+        # Fail-closed projection of canonical Sjagil/crypto authority state.
+        try:
+            payload = dict(self.authority_status() or {})
+        except Exception as exc:
+            return {
+                "ready": False,
+                "blockers": [
+                    (
+                        "CANONICAL_AUTHORITY_UNAVAILABLE:"
+                        f"{type(exc).__name__}:{str(exc)[:300]}"
+                    )
+                ],
+                "backend": "Sjagil/crypto:core.swing_layer_live",
+                "canonical": {},
+                "orders_generated": 0,
+                "orders_submitted": 0,
+            }
+
+        blockers: list[str] = []
+        if payload.get("active") is not True:
+            blockers.append("NATIVE_CANARY_AUTHORITY_NOT_ACTIVE")
+        if str(payload.get("state_status") or "UNKNOWN").upper() != "READY":
+            blockers.append("NATIVE_CANARY_STATE_NOT_READY")
+        if payload.get("execution_environment_ready") is not True:
+            blockers.append("NATIVE_EXECUTION_ENVIRONMENT_NOT_READY")
+        if payload.get("spot_only") is not True:
+            blockers.append("CANONICAL_SPOT_ONLY_POLICY_NOT_CONFIRMED")
+        if any(payload.get(k) is True for k in ("margin", "leverage", "shorting", "withdrawals")):
+            blockers.append("CANONICAL_FORBIDDEN_CAPABILITY_ENABLED")
+        return {
+            "ready": not blockers,
+            "blockers": list(dict.fromkeys(blockers)),
+            "backend": "Sjagil/crypto:core.swing_layer_live",
+            "canonical": payload,
+            "orders_generated": 0,
+            "orders_submitted": 0,
+        }
 
     def approve(self, *, markets: list[str], approval: str) -> dict[str, Any]:
         return self._module().approve_swing_layer_canary(markets=tuple(markets), approval=approval)

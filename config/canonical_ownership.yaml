@@ -1,4 +1,4 @@
-schema_version: round39_canonical_ownership_v1
+schema_version: round40_canonical_ownership_v2
 canonical_repository: Sjagil/crypto
 application_repository: Sjagil/crypto-ai-swing-layer
 fail_closed: true
@@ -37,10 +37,5 @@ swing_owned:
   - retraining
   - champion_challenger_management
 
-# Temporary Round-40 migration targets only.
-legacy_migration_exceptions:
-  - src/crypto_ai_swing/execution/bitvavo.py
-  - src/crypto_ai_swing/execution/router.py
-  - src/crypto_ai_swing/orchestration/control_plane.py
-  - src/crypto_ai_swing/orchestration/proactive.py
-  - src/crypto_ai_swing/cli.py
+# Round 40 complete: canonical Sjagil/crypto owns exchange transport.
+legacy_migration_exceptions: []

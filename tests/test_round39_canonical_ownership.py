@@ -44,7 +44,8 @@ def test_round39_source_ownership_audit_has_no_new_violations() -> None:
     report = audit_source_ownership(root)
     assert report["ready"] is True
     assert report["violations"] == []
-    assert report["round40_required"] is True
+    assert report["legacy_migration_hits"] == []
+    assert report["round40_required"] is False
 
 
 def test_round39_strategy_uses_configurable_ensemble() -> None:

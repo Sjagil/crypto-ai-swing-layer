@@ -80,7 +80,7 @@ class NativeOperationsBridge:
                 "canonical_kelly_math": True,
                 "canonical_portfolio_risk": True,
                 "canonical_exchange_execution_contract": True,
-                "legacy_local_bitvavo_migration_pending": True,
+                "legacy_local_bitvavo_migration_pending": False,
             },
         }
 

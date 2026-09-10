@@ -81,6 +81,11 @@ def load_ownership_contract(project_root: Path) -> OwnershipContract:
     overlap = crypto_owned & swing_owned
     if overlap:
         violations.append("OWNERSHIP_OVERLAP:" + ",".join(sorted(overlap)))
+    if exceptions:
+        violations.append(
+            "ROUND40_LEGACY_MIGRATION_EXCEPTIONS_FORBIDDEN:"
+            + ",".join(sorted(exceptions))
+        )
     for relative in sorted(exceptions):
         candidate = Path(relative)
         if candidate.is_absolute() or ".." in candidate.parts:
@@ -118,7 +123,7 @@ def audit_source_ownership(project_root: Path) -> dict[str, Any]:
                 else:
                     violations.append({**row, "reason": "DUPLICATED_CANONICAL_IMPLEMENTATION"})
     return {
-        "schema_version": "round39_canonical_ownership_audit_v1",
+        "schema_version": "round40_canonical_ownership_audit_v1",
         "ready": not violations,
         "canonical_repository": contract.canonical_repository,
         "application_repository": contract.application_repository,
