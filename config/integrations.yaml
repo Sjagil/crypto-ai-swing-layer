@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 
 crypto_repo:
   env: CRYPTO_REPO_PATH
@@ -7,6 +7,7 @@ crypto_repo:
   dynamic_imports_enabled: true
   mode: python_library
   source_of_truth: true
+  canonical_env_authoritative: true
 
 modules:
   settings: config.settings
@@ -35,6 +36,41 @@ modules:
   rss: scrapers.rss
   intelligence: scrapers.intelligence
 
+data_source_fabric:
+  mode: canonical_orchestrator_only
+  duplicate_network_clients: compatibility_only_not_authoritative
+  known_compatibility_clients:
+    - src/crypto_ai_swing/execution/bitvavo.py
+    - src/crypto_ai_swing/intelligence/cmc_context.py
+    - src/crypto_ai_swing/nlp/sources.py
+  duplicate_data_store: false
+  private_exchange_requests: false
+  providers_from_canonical_settings: true
+  public_collection_callable: data.multi_source_runtime.run_multi_source_collector
+  intelligence_callable: scrapers.intelligence.run_intelligence_pipeline
+  rss_callable: scrapers.rss.collect_registered_feeds
+  readiness_script: scripts/canonical_data_source_audit.py
+  canonical_status_artifacts:
+    - output/multi_source/status.json
+    - output/multi_source/heartbeat.json
+    - data_store/intelligence/scraper_status.json
+  source_families:
+    exchange_market_data: [bitvavo, kraken, mexc]
+    market_context: [coinmarketcap, eodhd, coingecko, polygon]
+    macro: [fred, fiscal_data]
+    onchain: [defillama, dune, glassnode, cryptoquant]
+    derivatives_context: [deribit, coinglass]
+    news_sentiment: [alphavantage, currents, marketaux]
+    supplementary:
+      - coinpaprika
+      - fmp
+      - twelvedata
+      - finnhub
+      - marketstack
+      - theta_data
+      - openfigi
+      - openexchangerates
+
 market_data:
   provider: crypto_library
   venue: bitvavo
@@ -52,6 +88,9 @@ market_data:
 
 intelligence:
   use_crypto_repo_artifacts: true
+  use_canonical_live_collection: true
+  use_canonical_web_scrapers: true
+  use_canonical_rss: true
   use_parquet: true
   use_json: true
   modules: [scrapers.rss, scrapers.intelligence]
@@ -62,5 +101,5 @@ execution_adapter:
   intent_directory: output/crypto_ai_swing/trade_intents
   live_submission_enabled: false
   note: >-
-    Live submission stays fail-closed until crypto-library-doctor exposes the
-    exact public callable/contract in core.execution_authority on this checkout.
+    Live submission remains fail-closed and owned exclusively by Sjagil/crypto.
+    Data-source collection and intelligence cannot submit or promote orders.

@@ -18,14 +18,16 @@ class NewsSnapshot:
     documents: tuple[NLPDocument, ...]
     source_statuses: tuple[dict[str, Any], ...]
     observed_at: str
-    source: str = "Sjagil/crypto:scrapers.rss"
+    source: str = "Sjagil/crypto:scrapers.intelligence"
 
 
 class CryptoNewsCollector:
-    """Consume the canonical RSS collector from Sjagil/crypto.
+    """Consume the full canonical web + RSS intelligence pipeline.
 
-    Publication/observation knowability remains owned by the crypto repository.
-    This adapter only converts its IntelligenceRecord contract into NLPDocument.
+    Network acquisition, robots handling, publication-time knowability,
+    relevance filtering, deduplication and persistence remain owned by
+    Sjagil/crypto. This adapter only converts canonical IntelligenceRecord
+    objects into NLPDocument objects for the swing layer.
     """
 
     def __init__(
@@ -59,8 +61,10 @@ class CryptoNewsCollector:
             if value is None:
                 continue
             try:
-                ts = value if isinstance(value, datetime) else datetime.fromisoformat(
-                    str(value).replace("Z", "+00:00")
+                ts = (
+                    value
+                    if isinstance(value, datetime)
+                    else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
                 )
                 if ts.tzinfo is None:
                     return None
@@ -74,7 +78,7 @@ class CryptoNewsCollector:
         usable_at = cls._usable_at(record)
         if usable_at is None:
             return None
-        get = (lambda key, default=None: getattr(record, key, default))
+        get = lambda key, default=None: getattr(record, key, default)
         if isinstance(record, dict):
             get = lambda key, default=None: record.get(key, default)
         title = str(get("title", "") or "")
@@ -83,6 +87,7 @@ class CryptoNewsCollector:
             return None
         markets = tuple(str(x) for x in (get("markets", ()) or ()))
         categories = tuple(str(x) for x in (get("categories", ()) or ()))
+        entities = tuple(str(x) for x in (get("entities", ()) or ()))
         return NLPDocument(
             text=summary or title,
             title=title,
@@ -93,73 +98,74 @@ class CryptoNewsCollector:
                 "event_id": str(get("event_id", "") or ""),
                 "markets": markets,
                 "categories": categories,
+                "entities": entities,
                 "relevance_score": float(get("relevance_score", 0.0) or 0.0),
                 "sentiment_score": float(get("sentiment_score", 0.0) or 0.0),
                 "impact_score": float(get("impact_score", 0.0) or 0.0),
                 "timestamp_quality": str(get("timestamp_quality", "") or ""),
                 "historical_coverage": str(get("historical_coverage", "") or ""),
+                "classification_source": "Sjagil/crypto:scrapers.intelligence",
             },
         )
 
-    async def _collect_async(self) -> NewsSnapshot:
+    @staticmethod
+    def _status_row(row: Any) -> dict[str, Any]:
+        dump = getattr(row, "model_dump", None)
+        if callable(dump):
+            return dict(dump(mode="json"))
+        if isinstance(row, dict):
+            return dict(row)
+        return {
+            "source_id": getattr(row, "source_id", None)
+            or getattr(row, "feed_id", None),
+            "publisher": getattr(row, "publisher", None),
+            "status": getattr(row, "status", None),
+            "fetched_records": getattr(row, "fetched_records", None)
+            or getattr(row, "record_count", None),
+            "relevant_records": getattr(row, "relevant_records", None),
+            "error_code": getattr(row, "error_code", None),
+        }
+
+    async def _canonical_intelligence(self) -> tuple[str, Iterable[Any], Iterable[Any], Any]:
+        module = self.bridge.import_module("scrapers.intelligence")
+        run = getattr(module, "run_intelligence_pipeline", None)
+        if not callable(run):
+            raise RuntimeError("scrapers.intelligence.run_intelligence_pipeline unavailable")
+        result = await run(self.bridge.settings())
+        return (
+            str(getattr(result, "status", "UNKNOWN")),
+            getattr(result, "records", ()) or (),
+            getattr(result, "sources", ()) or (),
+            getattr(result, "observed_at", datetime.now(timezone.utc)),
+        )
+
+    async def _rss_fallback(self) -> tuple[str, Iterable[Any], Iterable[Any], Any]:
         module = self.bridge.import_module("scrapers.rss")
         collect = getattr(module, "collect_registered_feeds", None)
         if not callable(collect):
             raise RuntimeError("scrapers.rss.collect_registered_feeds unavailable")
-        collection = await collect()
-        records: Iterable[Any] = getattr(collection, "records", ()) or ()
-        classifier = None
+        result = await collect()
+        return (
+            str(getattr(result, "status", "UNKNOWN")),
+            getattr(result, "records", ()) or (),
+            getattr(result, "feeds", ()) or (),
+            getattr(result, "observed_at", datetime.now(timezone.utc)),
+        )
+
+    async def _collect_async(self) -> NewsSnapshot:
         try:
-            intelligence = self.bridge.import_module("scrapers.intelligence")
-            candidate = getattr(intelligence, "classify_text", None)
-            classifier = candidate if callable(candidate) else None
+            status, records, source_rows, observed = await self._canonical_intelligence()
+            source = "Sjagil/crypto:scrapers.intelligence"
         except Exception:
-            classifier = None
+            status, records, source_rows, observed = await self._rss_fallback()
+            source = "Sjagil/crypto:scrapers.rss"
+
         docs: list[NLPDocument] = []
         seen: set[tuple[str, str, str]] = set()
         for record in records:
             doc = self._to_document(record)
             if doc is None:
                 continue
-            if classifier is not None:
-                try:
-                    metadata = dict(doc.metadata)
-                    base_categories = tuple(metadata.get("categories", ()) or ())
-                    crypto_native = float(metadata.get("relevance_score", 0.0) or 0.0) >= 0.99
-                    (
-                        relevance,
-                        entities,
-                        markets,
-                        categories,
-                        sentiment,
-                        impact,
-                    ) = classifier(
-                        doc.title,
-                        doc.text,
-                        base_categories=base_categories,
-                        crypto_native=crypto_native,
-                    )
-                    metadata.update(
-                        {
-                            "markets": tuple(sorted(set(metadata.get("markets", ())) | set(markets))),
-                            "categories": tuple(sorted(set(base_categories) | set(categories))),
-                            "entities": tuple(entities),
-                            "relevance_score": float(max(float(metadata.get("relevance_score", 0.0) or 0.0), relevance)),
-                            "sentiment_score": float(sentiment),
-                            "impact_score": float(max(float(metadata.get("impact_score", 0.0) or 0.0), impact)),
-                            "classification_source": "Sjagil/crypto:scrapers.intelligence.classify_text",
-                        }
-                    )
-                    doc = NLPDocument(
-                        text=doc.text,
-                        title=doc.title,
-                        usable_at=doc.usable_at,
-                        source=doc.source,
-                        url=doc.url,
-                        metadata=metadata,
-                    )
-                except Exception:
-                    pass
             key = (doc.source, doc.url or "", doc.title or doc.text[:200])
             if key in seen:
                 continue
@@ -167,29 +173,15 @@ class CryptoNewsCollector:
             docs.append(doc)
         docs.sort(key=lambda item: item.usable_at, reverse=True)
         docs = docs[: self.maximum_documents]
-        statuses = []
-        for row in getattr(collection, "feeds", ()) or ():
-            dump = getattr(row, "model_dump", None)
-            if callable(dump):
-                value = dump(mode="json")
-            elif isinstance(row, dict):
-                value = dict(row)
-            else:
-                value = {
-                    "feed_id": getattr(row, "feed_id", None),
-                    "publisher": getattr(row, "publisher", None),
-                    "status": getattr(row, "status", None),
-                    "record_count": getattr(row, "record_count", None),
-                    "error_code": getattr(row, "error_code", None),
-                }
-            statuses.append(value)
-        observed = getattr(collection, "observed_at", datetime.now(timezone.utc))
-        status = str(getattr(collection, "status", "UNKNOWN"))
+        statuses = tuple(self._status_row(row) for row in source_rows)
         return NewsSnapshot(
             status=status,
             documents=tuple(docs),
-            source_statuses=tuple(statuses),
-            observed_at=observed.isoformat() if hasattr(observed, "isoformat") else str(observed),
+            source_statuses=statuses,
+            observed_at=(
+                observed.isoformat() if hasattr(observed, "isoformat") else str(observed)
+            ),
+            source=source,
         )
 
     def collect(self, *, force: bool = False, persist: bool = True) -> NewsSnapshot:

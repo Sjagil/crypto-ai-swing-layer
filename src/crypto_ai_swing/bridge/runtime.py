@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
+from crypto_ai_swing.bridge.environment import hydrate_canonical_environment
 from crypto_ai_swing.settings import Settings
 
 
@@ -21,6 +22,7 @@ def canonical_crypto_root(settings: Settings | None = None) -> Path:
 def activate_canonical_crypto(settings: Settings | None = None) -> CryptoLibraryBridge:
     selected = settings or Settings.load()
     root = canonical_crypto_root(selected)
+    hydrate_canonical_environment(root)
     root_text = str(root)
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
@@ -29,3 +31,11 @@ def activate_canonical_crypto(settings: Settings | None = None) -> CryptoLibrary
 
 def canonical_module(name: str, settings: Settings | None = None) -> Any:
     return activate_canonical_crypto(settings).import_module(name)
+
+
+__all__ = [
+    "activate_canonical_crypto",
+    "canonical_crypto_root",
+    "canonical_module",
+    "hydrate_canonical_environment",
+]

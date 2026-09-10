@@ -5,10 +5,12 @@ from pathlib import Path
 import os
 import yaml
 
+from crypto_ai_swing.bridge.environment import hydrate_canonical_environment
+
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values
 except Exception:
-    load_dotenv = None
+    dotenv_values = None
 
 
 def load_yaml(path: Path) -> dict:
@@ -17,6 +19,22 @@ def load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     return data or {}
+
+
+def _load_swing_environment(root: Path) -> None:
+    """Load only orchestrator-owned environment variables from swing `.env`."""
+
+    if dotenv_values is None:
+        return
+    path = root / ".env"
+    if not path.is_file():
+        return
+    for key, value in dotenv_values(path).items():
+        name = str(key)
+        if value is None or not str(value).strip():
+            continue
+        if name == "CRYPTO_REPO_PATH" or name.startswith("CRYPTO_SWING_"):
+            os.environ.setdefault(name, str(value))
 
 
 @dataclass(frozen=True)
@@ -41,11 +59,16 @@ class Settings:
     @classmethod
     def load(cls, project_root: Path | None = None) -> "Settings":
         root = (project_root or Path.cwd()).resolve()
-        if load_dotenv is not None:
-            load_dotenv(root / ".env", override=False)
+        _load_swing_environment(root)
         crypto_root = Path(os.getenv("CRYPTO_REPO_PATH", "../crypto")).expanduser()
         if not crypto_root.is_absolute():
             crypto_root = (root / crypto_root).resolve()
+
+        # Sjagil/crypto owns provider, exchange, risk and live authority env.
+        # This happens after the swing-only load so stale duplicated keys in
+        # the orchestrator cannot weaken or redirect the canonical engine.
+        hydrate_canonical_environment(crypto_root)
+
         cfg = root / "config"
         return cls(
             project_root=root,
