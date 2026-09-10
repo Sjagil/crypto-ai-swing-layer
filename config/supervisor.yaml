@@ -15,3 +15,6 @@ forward_mature_seconds: 900
 edge_refresh_seconds: 900
 promotion_registry_seconds: 3600
 rl_retrain_seconds: 86400
+
+agent_manager_enabled: true
+agent_manager_check_seconds: 60

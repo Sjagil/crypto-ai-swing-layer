@@ -9,8 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from crypto_ai_swing.agents.training import AgentTrainer
-from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
+from crypto_ai_swing.agents.manager import AgentManager
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.orchestration.proactive import ProactiveTrader
 from crypto_ai_swing.research.bootstrap import ColdStartResearchRunner
@@ -41,8 +40,7 @@ class AutonomousSupervisor:
         )
         self.universe = UniverseManager(settings)
         self.trader = ProactiveTrader(settings, mode=mode)
-        self.trainer = AgentTrainer(settings)
-        self.rl_trainer = MultiMarketRLTrainer(settings)
+        self.agent_manager = AgentManager(settings, mode=mode)
         self.research = NativeResearchBridge(settings.crypto_repo_root)
         self.bootstrap_research = ColdStartResearchRunner(settings)
         self.operations = NativeOperationsBridge(
@@ -71,7 +69,7 @@ class AutonomousSupervisor:
         if not raw:
             return True
         try:
-            previous = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            previous = datetime.fromisoformat(str(raw))
             if previous.tzinfo is None:
                 previous = previous.replace(tzinfo=UTC)
         except ValueError:
@@ -216,62 +214,29 @@ class AutonomousSupervisor:
                 "error": f"{type(exc).__name__}: {str(exc)[:500]}",
             })
 
-        acfg = dict(getattr(self.settings, "agents", {}) or {})
-        if bool(acfg.get("enabled", True)) and self._due(
-            "last_agent_train_at", int(self.cfg.get("agent_retrain_seconds", 21600))
-        ):
-            try:
-                self._task("agent_training")
-                configured = [str(x).upper() for x in acfg.get("training_markets", []) if str(x).strip()]
-                training_markets = configured or list(universe.get("markets") or [])
-                result = self.trainer.train(
-                    markets=training_markets,
-                    timeframe=str(acfg.get("timeframe", "1h")),
-                    horizon_bars=int(acfg.get("horizon_bars", 4)),
-                    minimum_rows=int(acfg.get("minimum_rows", 1200)),
-                    minimum_net_move_bps=float(acfg.get("minimum_net_move_bps", 65)),
+        try:
+            self._task("agent_manager")
+            forward_cfg = dict(
+                (getattr(self.settings, "autonomy", {}) or {}).get(
+                    "forward_evidence", {}
                 )
-                tasks["agent_training"] = {
-                    "status": result.status,
-                    "artifact": str(result.artifact_path),
-                    "rows": result.row_count,
-                    "market_count": len(result.markets),
-                    "metrics": result.metrics,
-                }
-                self.state["last_agent_train_at"] = _now().isoformat()
-                self._last_completed_task = "agent_training"
-            except Exception as exc:
-                errors.append({"task": "agent_training", "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
-
-
-        rl_cfg = dict(acfg.get("rl", {}) or {})
-        if bool(rl_cfg.get("enabled", False)) and self._due(
-            "last_rl_train_at",
-            int(rl_cfg.get("retrain_seconds", 86400)),
-        ):
-            try:
-                self._task("rl_training")
-                configured = [
-                    str(x).upper()
-                    for x in acfg.get("training_markets", [])
-                    if str(x).strip()
-                ]
-                rl_markets = configured or list(universe.get("markets") or [])
-                tasks["rl_training"] = self.rl_trainer.train(
-                    markets=rl_markets,
-                    timeframe=str(rl_cfg.get("timeframe", "1h")),
-                    total_timesteps=int(rl_cfg.get("total_timesteps", 50000)),
-                    minimum_rows_per_market=int(
-                        rl_cfg.get("minimum_rows_per_market", 600)
-                    ),
-                )
-                self.state["last_rl_train_at"] = _now().isoformat()
-                self._last_completed_task = "rl_training"
-            except Exception as exc:
-                errors.append({
-                    "task": "rl_training",
+            )
+            forward_path = self.settings.project_root / forward_cfg.get(
+                "path",
+                "output/crypto_ai_swing/forward/forward.sqlite",
+            )
+            tasks["agent_manager"] = self.agent_manager.cycle(
+                markets=list(universe.get("markets") or []),
+                forward_database_path=forward_path,
+            )
+            self._last_completed_task = "agent_manager"
+        except Exception as exc:
+            errors.append(
+                {
+                    "task": "agent_manager",
                     "error": f"{type(exc).__name__}: {str(exc)[:500]}",
-                })
+                }
+            )
 
         if self._due("last_economics_at", int(self.cfg.get("economics_refresh_seconds", 21600))):
             try:

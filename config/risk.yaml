@@ -30,3 +30,15 @@ trade:
 correlation:
   maximum_pairwise_correlation: 0.85
   maximum_cluster_weight: 0.35
+
+kelly:
+  enabled: true
+  fractional_kelly_fraction: 0.25
+  uncertainty_probability_shrink: 0.75
+  minimum_net_edge_bps: 0.0
+  strong_score: 0.72
+  strong_confidence: 0.65
+  exceptional_score: 0.82
+  exceptional_confidence: 0.75
+  canonical_risk_never_widened: true
+  require_calibrated_probability_for_live: true

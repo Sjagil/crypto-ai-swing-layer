@@ -81,6 +81,8 @@ class NativeOperationsBridge:
                 "canonical_portfolio_risk": True,
                 "canonical_exchange_execution_contract": True,
                 "legacy_local_bitvavo_migration_pending": False,
+                "canonical_decision_packet_portfolio_route": True,
+                "agent_manager_continuous": True,
             },
         }
 

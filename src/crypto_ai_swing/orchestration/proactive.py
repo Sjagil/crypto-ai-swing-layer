@@ -12,9 +12,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from crypto_ai_swing.agents.runtime import AgentRuntime
-from crypto_ai_swing.agents.rl_runtime import RLRuntime
+from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
 from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
+from crypto_ai_swing.agents.rl_runtime import RLRuntime
+from crypto_ai_swing.agents.runtime import AgentRuntime
 from crypto_ai_swing.bridge.crypto_library import (
     CryptoLibraryBridge,
 )
@@ -24,8 +25,8 @@ from crypto_ai_swing.execution.active_swing_canary import (
     execution_validation_canary_config,
 )
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
-from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.cmc_context import CMCContextCollector
+from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.technical import (
     multi_timeframe_snapshot,
     technical_snapshot,
@@ -35,21 +36,22 @@ from crypto_ai_swing.nlp.sources import (
     discover_crypto_repo_documents,
     fetch_rss_documents,
 )
+from crypto_ai_swing.orchestration.mtf_challenger import evaluate_mtf_challenger
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
 from crypto_ai_swing.orchestration.rally_capture import (
     assess_rally,
     macro_override_allowed,
 )
 from crypto_ai_swing.orchestration.timeframe_pipeline import evaluate_timeframe_pipeline
-from crypto_ai_swing.orchestration.mtf_challenger import evaluate_mtf_challenger
+from crypto_ai_swing.production.guard import LiveExecutionGuard
 from crypto_ai_swing.quant.bayesian_forward import (
     build_bayesian_forward_snapshot,
+)
+from crypto_ai_swing.quant.bayesian_forward import (
     persist as persist_bayesian_forward,
 )
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
-from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
-from crypto_ai_swing.production.guard import LiveExecutionGuard
 
 
 @dataclass(frozen=True)
@@ -293,7 +295,7 @@ class ProactiveTrader:
         return fallback, fallback, Decimal(0)
 
     def _paper_fee_bps(self) -> Decimal:
-        costs = dict((self.settings.execution.get("costs", {}) or {}))
+        costs = dict(self.settings.execution.get("costs", {}) or {})
         return Decimal(str(costs.get("fee_bps_per_side", 25.0)))
 
     def _paper_mark_prices(self, positions) -> dict[str, Decimal]:
@@ -454,7 +456,7 @@ class ProactiveTrader:
             try:
                 amount = Decimal(str(fill.get("amount", "0")))
                 price = Decimal(str(fill.get("price", "0")))
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             total_amount += amount
             total_quote += amount * price
@@ -503,7 +505,7 @@ class ProactiveTrader:
                     "reason_code": "SIMULATED_ACCOUNT_RECONCILIATION_REQUIRED",
                     "intent_id": intent.intent_id,
                 }
-            fee_fraction = self._paper_fee_bps() / Decimal("10000")
+            fee_fraction = self._paper_fee_bps() / Decimal(10000)
             required_cash = intent.notional_eur * (Decimal(1) + fee_fraction)
             if cash_now < required_cash:
                 return {
@@ -516,7 +518,7 @@ class ProactiveTrader:
                     "available_cash_eur": str(cash_now),
                     "intent_id": intent.intent_id,
                 }
-            portfolio_cfg = dict((self.settings.risk.get("portfolio", {}) or {}))
+            portfolio_cfg = dict(self.settings.risk.get("portfolio", {}) or {})
             max_fraction = Decimal(str(portfolio_cfg.get(
                 "max_total_exposure_fraction",
                 portfolio_cfg.get("max_exposure_fraction", 0.85),
@@ -670,7 +672,8 @@ class ProactiveTrader:
                 amount=Decimal(str(row.get("quantity") or "0"));entry=Decimal(str(row.get("entry_price") or "0"))
                 stop=float(row.get("stop_pct") or .02);take=float(row.get("take_profit_pct") or max(.025,3*stop))
                 trailing=float(row.get("trailing_stop_pct") or max(.008,1.2*stop))
-            except Exception: continue
+            except Exception:  # noqa: S112
+                continue
             if amount<=0 or entry<=0: continue
             existing=local.get(market);highest=max(existing.highest_price,entry) if existing else entry
             self.state.upsert_position(Position(market,amount,entry,highest,stop,take,trailing,str(row.get("opened_at") or datetime.now(UTC).isoformat())))
@@ -723,7 +726,7 @@ class ProactiveTrader:
                         or "0"
                     )
                 )
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             if price <= 0:
                 continue
@@ -1183,7 +1186,7 @@ class ProactiveTrader:
                 context[market]["cmc"] = dict(
                     (cmc_context.get('runtime_assets') or {}).get(market) or {}
                 )
-                rl_cfg = dict((self.settings.agents.get('rl', {}) or {}))
+                rl_cfg = dict(self.settings.agents.get('rl', {}) or {})
                 context[market]["rl_score"] = (
                     float(rl_preview['score'])
                     if self.mode != 'live'
@@ -1233,6 +1236,19 @@ class ProactiveTrader:
             Decimal(0),
         )
         authority = Authority.LIVE if self.mode == "live" else Authority.PAPER if self.mode == "paper" else Authority.SHADOW
+        portfolio_positions = [
+            {
+                "market": pos.market,
+                "amount": pos.amount,
+                "entry_price": pos.entry_price,
+                "open_risk_eur": (
+                    pos.amount
+                    * pos.entry_price
+                    * Decimal(str(pos.stop_pct))
+                ),
+            }
+            for pos in positions_for_risk.values()
+        ]
         result = SwingPipeline(self.settings).run(
             frames,
             equity_eur=equity,
@@ -1242,6 +1258,7 @@ class ProactiveTrader:
             spread_bps=spreads,
             market_context=context,
             authority=authority,
+            portfolio_positions=portfolio_positions,
         )
 
         executions = []

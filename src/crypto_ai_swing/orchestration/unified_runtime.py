@@ -4,21 +4,20 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
-from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.orchestration.supervisor import AutonomousSupervisor
+from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
 from crypto_ai_swing.research.performance_attribution import PerformanceAttributionEngine
 from crypto_ai_swing.research.promotion import ResearchPromotionRegistry
 from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.research.swing_geometry import SwingGeometryEngine
-from crypto_ai_swing.research.entry_selector import ProspectiveSwingEntrySelector
 from crypto_ai_swing.universe.runtime import UniverseManager
 
 
@@ -58,8 +57,8 @@ class UnifiedAutonomyRuntime:
         self.entry_selector = ProspectiveSwingEntrySelector(
             settings, mode=self.mode
         )
-        self.edge = ResearchEdgeManager(settings, mode="shadow" if self.mode == "live" else self.mode)
-        self.rl = MultiMarketRLTrainer(settings)
+        self.agent_manager = self.base.agent_manager
+        self.edge = self.agent_manager.edge_manager
         self.registry = ResearchPromotionRegistry(settings)
         self.state = self._load_state()
         self._cycle_id: str | None = None
@@ -78,7 +77,7 @@ class UnifiedAutonomyRuntime:
         if not raw:
             return None
         try:
-            value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            value = datetime.fromisoformat(str(raw))
             return value if value.tzinfo else value.replace(tzinfo=UTC)
         except Exception:
             return None
@@ -160,25 +159,33 @@ class UnifiedAutonomyRuntime:
     def _refresh_edge(self) -> dict[str, Any]:
         ledger = self._forward_ledger()
         try:
-            return self.edge.refresh_policy(ledger.path, force=True)
+            result = self.agent_manager.cycle(
+                markets=[
+                    str(value).upper()
+                    for value in self.universe.current().get("markets", [])
+                    if str(value).strip()
+                ],
+                forward_database_path=ledger.path,
+            )
+            return {
+                "status": "DELEGATED_TO_AGENT_MANAGER",
+                "agent_manager_status": result.get("status"),
+                "edge_manager": result.get("tasks", {}).get(
+                    "edge_manager", {}
+                ),
+                "orders_submitted": 0,
+            }
         finally:
             ledger.close()
 
     def _rl_tournament(self) -> dict[str, Any]:
-        universe = self.universe.current()
-        markets = [str(x).upper() for x in universe.get("markets", []) if str(x).strip()]
-        if len(markets) < 6:
-            return {"status": "BLOCKED", "reason": "INSUFFICIENT_RUNTIME_UNIVERSE", "markets": len(markets)}
-        cfg = dict((getattr(self.settings, "agents", {}) or {}).get("rl", {}) or {})
-        result = self.rl.train(
-            markets=markets,
-            timeframe=str(cfg.get("timeframe", "1h")),
-            total_timesteps=int(cfg.get("scheduled_total_timesteps", 90_000)),
-            minimum_rows_per_market=int(cfg.get("minimum_rows_per_market", 900)),
-        )
-        result["live_decision_influence"] = False
-        result["automatic_live_promotion"] = False
-        return result
+        return {
+            "status": "DELEGATED_TO_AGENT_MANAGER",
+            "agent_manager": self.agent_manager.status(),
+            "live_decision_influence": False,
+            "automatic_live_promotion": False,
+            "orders_submitted": 0,
+        }
 
     def _registry_refresh(self) -> dict[str, Any]:
         return self.registry.refresh()

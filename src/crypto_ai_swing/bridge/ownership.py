@@ -21,6 +21,11 @@ MANDATORY_SWING_DOMAINS = frozenset({
     "prospective_validation", "market_intelligence_fusion", "decision_generation",
     "performance_attribution", "retraining", "champion_challenger_management",
 })
+LOCAL_AUTHORITY_IMPORT_MARKERS = (
+    "crypto_ai_swing.portfolio.allocator",
+    "crypto_ai_swing.portfolio.risk",
+    "crypto_ai_swing.execution.costs",
+)
 LEGACY_EXCHANGE_MARKERS = (
     "crypto_ai_swing.execution.bitvavo", "class BitvavoREST", "api.bitvavo.com",
 )
@@ -108,6 +113,13 @@ def audit_source_ownership(project_root: Path) -> dict[str, Any]:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         exception = relative in contract.legacy_migration_exceptions
+        for marker in LOCAL_AUTHORITY_IMPORT_MARKERS:
+            if marker in text:
+                violations.append({
+                    "path": relative,
+                    "marker": marker,
+                    "reason": "LOCAL_CANONICAL_AUTHORITY_DEPENDENCY",
+                })
         for marker in LEGACY_EXCHANGE_MARKERS:
             if marker in text:
                 row = {"path": relative, "marker": marker}
@@ -123,7 +135,7 @@ def audit_source_ownership(project_root: Path) -> dict[str, Any]:
                 else:
                     violations.append({**row, "reason": "DUPLICATED_CANONICAL_IMPLEMENTATION"})
     return {
-        "schema_version": "round40_canonical_ownership_audit_v1",
+        "schema_version": "round41_canonical_ownership_audit_v1",
         "ready": not violations,
         "canonical_repository": contract.canonical_repository,
         "application_repository": contract.application_repository,

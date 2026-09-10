@@ -104,3 +104,17 @@ edge_manager:
   minimum_profit_factor: 1.2
   minimum_payoff_ratio: 1.1
   require_swing_geometry: true
+
+manager:
+  enabled: true
+  check_seconds: 60
+  supervised_retrain_seconds: 14400
+  rl_retrain_seconds: 86400
+  edge_refresh_seconds: 900
+  registry_refresh_seconds: 3600
+  stale_lock_seconds: 21600
+  retrain_missing_or_expired_immediately: true
+  continuous_monitoring: true
+  live_decision_influence: false
+  automatic_live_authority: false
+  automatic_model_live_promotion: false

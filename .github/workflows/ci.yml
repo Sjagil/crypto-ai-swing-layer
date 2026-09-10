@@ -34,7 +34,7 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
       - name: Ruff
-        run: python -m ruff check --ignore BLE001,S110 src/crypto_ai_swing/bridge/crypto_operations.py src/crypto_ai_swing/bridge/ownership.py src/crypto_ai_swing/strategies/swing.py src/crypto_ai_swing/orchestration/pipeline.py scripts/canonical_ownership_audit.py tests/test_round39_canonical_ownership.py src/crypto_ai_swing/execution/crypto_authority.py src/crypto_ai_swing/execution/router.py tests/test_live_gate.py tests/test_bitvavo_execution.py tests/test_round40_canonical_execution.py
+        run: python -m ruff check --ignore BLE001,S110 src/crypto_ai_swing/bridge/crypto_operations.py src/crypto_ai_swing/bridge/ownership.py src/crypto_ai_swing/strategies/swing.py src/crypto_ai_swing/orchestration/pipeline.py scripts/canonical_ownership_audit.py tests/test_round39_canonical_ownership.py src/crypto_ai_swing/execution/crypto_authority.py src/crypto_ai_swing/execution/router.py tests/test_live_gate.py tests/test_bitvavo_execution.py tests/test_round40_canonical_execution.py src/crypto_ai_swing/decision_packet.py src/crypto_ai_swing/bridge/canonical_portfolio.py src/crypto_ai_swing/agents/manager.py src/crypto_ai_swing/production/dataflow_audit.py scripts/round41_dataflow_audit.py scripts/round41_agent_manager_once.py tests/test_round41_decision_packet.py tests/test_round41_agent_manager.py tests/test_round41_dataflow_contract.py tests/test_round41_canonical_portfolio.py
       - name: Canonical ownership audit
         run: python scripts/canonical_ownership_audit.py
       - name: Tests
@@ -68,6 +68,10 @@ jobs:
             tests/test_round36_1_engine_contract.py \
             tests/test_round39_canonical_ownership.py \
             tests/test_round40_canonical_execution.py \
+            tests/test_round41_decision_packet.py \
+            tests/test_round41_agent_manager.py \
+            tests/test_round41_dataflow_contract.py \
+            tests/test_round41_canonical_portfolio.py \
             tests/test_round7_forward_causality.py \
             tests/test_round8_live_evidence_gate.py \
             tests/test_round8_prospective_readiness.py

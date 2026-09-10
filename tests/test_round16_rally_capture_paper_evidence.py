@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from crypto_ai_swing.execution.costs import estimate_cost
 from crypto_ai_swing.orchestration.rally_capture import assess_rally, macro_override_allowed
 
 
@@ -70,70 +69,6 @@ def test_macro_override_is_paper_only_and_soft_blocker_only():
         "MTF_EXECUTION_SPREAD_TOO_WIDE",
     )
     assert not macro_override_allowed(decision, result, mode="paper", config=_cfg())
-
-
-def test_paper_proxy_edge_can_skip_edge_ratio_without_skipping_spread_gate():
-    config = {
-        "costs": {
-            "fee_bps_per_side": 25.0,
-            "base_slippage_bps": 2.0,
-            "volatility_slippage_coefficient": 0.08,
-            "participation_coefficient": 12.0,
-            "maximum_slippage_bps": 150.0,
-        },
-        "edge_gate": {
-            "minimum_net_edge_bps": 8.0,
-            "minimum_edge_to_cost_ratio": 1.5,
-            "round_trip": True,
-        },
-        "liquidity": {
-            "maximum_participation_rate": 0.05,
-            "minimum_24h_quote_volume_eur": 250000,
-            "maximum_spread_bps": 35.0,
-        },
-    }
-    canonical = {
-        "cost_model_version": "canonical_test",
-        "taker_fee_bps": 25.0,
-        "slippage_bps": 8.0,
-    }
-    gated = estimate_cost(
-        98.86037476138729,
-        2.28,
-        0.02,
-        0.0001,
-        config,
-        quote_volume_eur=13_000_000,
-        canonical_cost=canonical,
-        enforce_edge_gate=True,
-    )
-    evidence = estimate_cost(
-        98.86037476138729,
-        2.28,
-        0.02,
-        0.0001,
-        config,
-        quote_volume_eur=13_000_000,
-        canonical_cost=canonical,
-        enforce_edge_gate=False,
-    )
-    assert "EDGE_COST_RATIO" in gated.blockers
-    assert evidence.approved is True
-    assert evidence.edge_gate_enforced is False
-    assert evidence.cost_model_version == "canonical_test"
-
-    bad_spread = estimate_cost(
-        200.0,
-        80.0,
-        0.01,
-        0.0001,
-        config,
-        quote_volume_eur=13_000_000,
-        canonical_cost=canonical,
-        enforce_edge_gate=False,
-    )
-    assert "SPREAD" in bad_spread.blockers
-    assert bad_spread.approved is False
 
 
 def test_runtime_universe_observes_overextended_asset_by_default(tmp_path):

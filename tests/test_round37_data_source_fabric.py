@@ -130,6 +130,7 @@ def test_fabric_audit_is_secret_safe_and_uses_canonical_contracts(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("CMC_API_KEY", raising=False)
     monkeypatch.setenv("COINMARKETCAP_API_KEY", "never-print-this")
     bridge = _Bridge(tmp_path)
     fabric = CanonicalDataSourceFabric(bridge, swing_root=tmp_path)
