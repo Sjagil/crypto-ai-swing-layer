@@ -207,6 +207,27 @@ class ForwardEvidenceLedger:
             "blocked_signals": int(blocked),
         }
 
+    def coverage_status(self) -> dict[str, Any]:
+        by_side = {
+            str(side): int(count)
+            for side, count in self.conn.execute(
+                "SELECT side, COUNT(*) FROM signal_observations GROUP BY side"
+            ).fetchall()
+        }
+        markets_by_side = {
+            str(side): int(count)
+            for side, count in self.conn.execute(
+                "SELECT side, COUNT(DISTINCT market) "
+                "FROM signal_observations GROUP BY side"
+            ).fetchall()
+        }
+        return {
+            "by_side": by_side,
+            "markets_by_side": markets_by_side,
+            "buy_observations": int(by_side.get("BUY", 0)),
+            "no_trade_observations": int(by_side.get("NO_TRADE", 0)),
+        }
+
     def outcome_status(self) -> dict[str, Any]:
         total = self.conn.execute(
             "SELECT COUNT(*) FROM forward_outcomes_v2"

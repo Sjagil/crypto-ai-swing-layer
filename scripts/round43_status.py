@@ -38,6 +38,13 @@ def main() -> int:
     )
     latest = _read(root / "latest.json")
     heartbeat = _read(root / "heartbeat.json")
+    mode_name = str(latest.get("mode") or "shadow").lower()
+    proactive = _read(
+        Path(settings.project_root)
+        / "output/crypto_ai_swing/modes"
+        / ("canary" if mode_name == "live" else mode_name)
+        / "proactive/latest.json"
+    )
     payload = {
         "schema_version": "crypto_ai_swing_round43_status_v1",
         "runtime": latest,
@@ -45,6 +52,7 @@ def main() -> int:
         "evidence": evidence.snapshot(persist=False),
         "optimization": optimizer.status(),
         "drift": drift.status(),
+        "proactive": proactive,
         "automatic_live_authority": False,
         "automatic_live_promotion": False,
     }
@@ -92,6 +100,29 @@ def main() -> int:
                 .get("economic_qualification")
             ),
             "drift_status": payload["drift"].get("status"),
+            "universe_selected_size": (
+                proactive.get("universe", {}).get("selected_size")
+            ),
+            "screened_markets": proactive.get("screened_markets"),
+            "deep_scan_market_count": len(
+                proactive.get("deep_scan_markets") or []
+            ),
+            "full_universe_evidence": proactive.get(
+                "full_universe_evidence", {}
+            ),
+            "full_universe_agent_inference": proactive.get(
+                "full_universe_agent_inference", {}
+            ),
+            "forward_observations_by_side": (
+                proactive.get("forward_evidence", {})
+                .get("coverage", {})
+                .get("by_side", {})
+            ),
+            "forward_markets_by_side": (
+                proactive.get("forward_evidence", {})
+                .get("coverage", {})
+                .get("markets_by_side", {})
+            ),
             "heartbeat_at": heartbeat.get("heartbeat_at"),
             "automatic_live_authority": False,
             "automatic_live_promotion": False,

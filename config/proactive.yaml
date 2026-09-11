@@ -41,7 +41,7 @@ active_swing:
     prospective_evidence_required_for_scaling: true
     alpha_evidence_authorized: false
     autoscale: false
-deep_scan_limit: 12
+deep_scan_limit: 25
 screen_spread_quality_scale_bps: 15
 screen_concurrency: 6
 rally_capture:

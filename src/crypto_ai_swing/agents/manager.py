@@ -232,12 +232,22 @@ class AgentManager:
                             acfg.get("minimum_net_move_bps", 65.0)
                         ),
                     )
+                supervised_markets = [
+                    str(value).upper() for value in result.markets
+                ]
                 tasks["supervised_training"] = {
                     "status": result.status,
                     "artifact": str(result.artifact_path),
                     "dataset_id": result.dataset_id,
                     "rows": result.row_count,
-                    "markets": list(result.markets),
+                    "markets": supervised_markets,
+                    "requested_markets": list(selected),
+                    "requested_market_count": len(selected),
+                    "trained_market_count": len(supervised_markets),
+                    "training_coverage_fraction": (
+                        len(set(supervised_markets) & set(selected))
+                        / max(1, len(selected))
+                    ),
                     "metrics": result.metrics,
                 }
                 self.state["last_supervised_train_at"] = _now().isoformat()
@@ -266,7 +276,19 @@ class AgentManager:
                             rcfg.get("minimum_rows_per_market", 900)
                         ),
                     )
-                tasks["rl_training"] = dict(result)
+                rl_payload = dict(result)
+                rl_markets = [
+                    str(value).upper()
+                    for value in (rl_payload.get("markets") or [])
+                ]
+                rl_payload["requested_markets"] = list(selected)
+                rl_payload["requested_market_count"] = len(selected)
+                rl_payload["trained_market_count"] = len(rl_markets)
+                rl_payload["training_coverage_fraction"] = (
+                    len(set(rl_markets) & set(selected))
+                    / max(1, len(selected))
+                )
+                tasks["rl_training"] = rl_payload
                 self.state["last_rl_train_at"] = _now().isoformat()
             except Exception as exc:
                 errors.append(
@@ -329,6 +351,9 @@ class AgentManager:
             "errors": errors,
             "continuous_monitoring": True,
             "training_is_bounded_and_due_driven": True,
+            "runtime_universe_training_markets": list(selected),
+            "runtime_universe_training_market_count": len(selected),
+            "full_25_market_training_requested": len(selected) == 25,
             "retrain_missing_expired_or_error_immediately": True,
             "challengers_research_only": True,
             "live_decision_influence": False,

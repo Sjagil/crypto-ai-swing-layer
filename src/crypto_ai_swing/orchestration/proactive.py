@@ -1091,7 +1091,7 @@ class ProactiveTrader:
             reverse=True,
         )
         open_markets = set(self.state.positions())
-        rally_ranked = sorted(
+        _rally_ranked = sorted(
             [
                 market
                 for market in screen
@@ -1109,8 +1109,11 @@ class ProactiveTrader:
             ),
             reverse=True,
         )
-        base_deep_markets = ranked[:deep_scan_limit]
-        rally_deep_markets = rally_ranked[:rally_scan_limit]
+        # Round43 full-universe research: every successfully screened member
+        # of the 25-market runtime universe receives full context evaluation.
+        # This expands evidence coverage; it does not force a trade.
+        base_deep_markets = list(ranked)
+        rally_deep_markets = []
         deep_markets: list[str] = []
         for market in (
             list(open_markets)
@@ -1489,14 +1492,102 @@ class ProactiveTrader:
         forward_cfg = self.settings.autonomy.get("forward_evidence", {}) if hasattr(self.settings, "autonomy") else {}
         should_record = bool(forward_cfg.get("enabled", True)) and bool(forward_cfg.get(f"record_{self.mode}", True))
         if should_record:
-            payload["forward_evidence"] = self.forward.append_cycle(payload, candle_times)
+            # Preserve actual trading signals in payload["signals"], but build a
+            # research-only evidence view containing one row per evaluated market.
+            evidence_payload = dict(payload)
+            raw_signals = [
+                dict(row)
+                for row in (payload.get("signals") or [])
+                if isinstance(row, dict) and row.get("market")
+            ]
+            raw_by_market = {
+                str(row.get("market") or "").upper(): row
+                for row in raw_signals
+            }
+            buy_signals = [
+                row
+                for row in raw_signals
+                if str(row.get("side") or "").upper() == "BUY"
+            ]
+            buy_markets = {
+                str(row.get("market") or "").upper()
+                for row in buy_signals
+            }
+            evidence_signals = list(buy_signals)
+            for market in markets:
+                if market in buy_markets or market not in causal_primary:
+                    continue
+                screen_row = dict(screen.get(market) or {})
+                raw_row = dict(raw_by_market.get(market) or {})
+                evidence_signals.append(
+                    {
+                        "market": market,
+                        "side": "NO_TRADE",
+                        "score": float(
+                            raw_row.get(
+                                "score",
+                                screen_row.get(
+                                    "execution_adjusted_score",
+                                    screen_row.get(
+                                        "opportunity_score",
+                                        0.0,
+                                    ),
+                                ),
+                            )
+                            or 0.0
+                        ),
+                        "edge_bps": float(raw_row.get("edge_bps") or 0.0),
+                        "edge_source": "FULL_UNIVERSE_NO_TRADE",
+                        "votes": list(raw_row.get("votes") or []),
+                    }
+                )
+            evidence_payload["signals"] = evidence_signals
+            payload["forward_evidence"] = self.forward.append_cycle(
+                evidence_payload,
+                candle_times,
+            )
             if bool(forward_cfg.get("mature_on_cycle", True)):
                 horizons = tuple(int(value) for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or []) if int(value) > 0)
                 payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(
                     forward_frames, horizons_hours=horizons or (1, 4, 24), execution_timeframe=execution_tf
                 )
             payload["forward_evidence"]["ledger"] = self.forward.status()
+            payload["forward_evidence"]["coverage"] = (
+                self.forward.coverage_status()
+            )
             payload["forward_evidence"]["outcomes"] = self.forward.outcome_status()
+            payload["full_universe_evidence"] = {
+                "schema_version": "round43_full_universe_evidence_v1",
+                "requested_universe_markets": len(markets),
+                "screened_markets": len(causal_primary),
+                "fully_evaluated_markets": len(frames),
+                "forward_frame_markets": len(forward_frames),
+                "raw_pipeline_signal_markets": len(raw_by_market),
+                "actual_signal_markets": len(buy_markets),
+                "no_trade_markets_added": max(
+                    0,
+                    len(evidence_signals) - len(buy_signals),
+                ),
+                "agent_inference_markets": sum(
+                    bool(row.get("agent_preview"))
+                    for row in screen.values()
+                ),
+                "rl_inference_markets": sum(
+                    bool(row.get("rl_preview"))
+                    for row in screen.values()
+                ),
+                "decision_bucket_minutes": int(
+                    forward_cfg.get("decision_bucket_minutes", 15)
+                ),
+                "horizons_hours": list(horizons)
+                if bool(forward_cfg.get("mature_on_cycle", True))
+                else list(forward_cfg.get("horizons_hours", [])),
+                "no_trade_is_research_only": True,
+                "canary_uses_unblocked_buy_only": True,
+                "economic_optimizer_uses_closed_trades_only": True,
+                "automatic_live_authority": False,
+                "automatic_live_promotion": False,
+            }
         else:
             payload["forward_evidence"] = {"recorded": False, "ledger": self.forward.status(), "outcomes": self.forward.outcome_status()}
 
