@@ -34,26 +34,64 @@ def _future_extreme(series: pd.Series, horizon: int, mode: str) -> pd.Series:
     table = pd.concat([series.shift(-step) for step in range(1, horizon + 1)], axis=1)
     return table.min(axis=1, skipna=False) if mode == "min" else table.max(axis=1, skipna=False)
 
+
 def build_agent_dataset(
     frames: dict[str, pd.DataFrame],
     *,
     horizon_bars: int = 4,
     minimum_net_move_bps: float = 65.0,
-    feature_columns: Iterable[str] = DEFAULT_FEATURES,
+    feature_columns: Iterable[str] | None = DEFAULT_FEATURES,
+    canonical_bridge=None,
 ) -> AgentDataset:
     horizon = int(horizon_bars)
     if horizon <= 0:
         raise ValueError("horizon_bars must be positive")
-    features = tuple(str(x) for x in feature_columns)
-    chunks: list[pd.DataFrame] = []
+
+    ohlcv_tables: dict[str, pd.DataFrame] = {}
+    feature_tables: dict[str, pd.DataFrame] = {}
     for market, raw in sorted(frames.items()):
         if raw is None or raw.empty:
             continue
         ohlcv = canonicalize_ohlcv(raw)
-        feat = build_features(ohlcv)
-        missing = [name for name in features if name not in feat.columns]
-        if missing:
-            raise ValueError(f"missing features: {missing}")
+        ohlcv_tables[market] = ohlcv
+        if canonical_bridge is None:
+            feature_tables[market] = build_features(ohlcv)
+        else:
+            from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+
+            feature_tables[market] = canonical_model_frame(
+                canonical_bridge,
+                ohlcv,
+                market=market,
+                timeframe=str(ohlcv.attrs.get("timeframe") or raw.attrs.get("timeframe") or "1h"),
+                benchmark=None,
+            )
+
+    if not feature_tables:
+        raise ValueError("no causal training rows")
+
+    if feature_columns is None:
+        from crypto_ai_swing.agents.canonical_features import candidate_columns
+
+        union = pd.concat(feature_tables.values(), axis=0, sort=False)
+        features = candidate_columns(
+            union,
+            minimum_coverage=0.55,
+            maximum_candidates=180,
+        )
+    else:
+        features = tuple(str(x) for x in feature_columns)
+    if not features:
+        raise ValueError("no usable causal feature columns")
+
+    chunks: list[pd.DataFrame] = []
+    for market, ohlcv in ohlcv_tables.items():
+        feat = feature_tables[market]
+        if canonical_bridge is None:
+            missing = [name for name in features if name not in feat.columns]
+            if missing:
+                raise ValueError(f"missing features: {missing}")
+        selected = feat.reindex(columns=list(features)).copy()
         future_close = ohlcv["close"].shift(-horizon)
         future_low = _future_extreme(ohlcv["low"], horizon, "min")
         future_high = _future_extreme(ohlcv["high"], horizon, "max")
@@ -62,7 +100,7 @@ def build_agent_dataset(
         mfe = (future_high / ohlcv["close"] - 1.0).clip(lower=0.0)
         threshold = float(minimum_net_move_bps) / 10_000.0
 
-        item = feat.loc[:, features].copy()
+        item = selected
         item["target_forward_return"] = forward_return
         item["target_mae"] = mae
         item["target_mfe"] = mfe
@@ -72,10 +110,15 @@ def build_agent_dataset(
         item["feature_time"] = item.index
         item["label_end_time"] = item.index.to_series().shift(-horizon)
         item = item.iloc[:-horizon] if len(item) > horizon else item.iloc[0:0]
-        item = item.replace([np.inf, -np.inf], np.nan).dropna(
-            subset=[*features, "target_forward_return", "target_mae", "target_mfe",
-                    "target_alpha", "target_regime_persistence", "label_end_time"]
-        )
+        target_columns = [
+            "target_forward_return",
+            "target_mae",
+            "target_mfe",
+            "target_alpha",
+            "target_regime_persistence",
+            "label_end_time",
+        ]
+        item = item.replace([np.inf, -np.inf], np.nan).dropna(subset=target_columns)
         chunks.append(item)
     if not chunks:
         raise ValueError("no causal training rows")
@@ -87,14 +130,21 @@ def build_agent_dataset(
     if (label_end <= feature_time).any():
         raise ValueError("labels are not strictly future-only")
     identity = pd.util.hash_pandas_object(
-        frame[[*features, "target_forward_return", "target_mae",
-               "target_regime_persistence", "market", "feature_time", "label_end_time"]],
+        frame[[
+            *features,
+            "target_forward_return",
+            "target_mae",
+            "target_regime_persistence",
+            "market",
+            "feature_time",
+            "label_end_time",
+        ]],
         index=False,
     ).to_numpy()
     digest = sha256(identity.tobytes()).hexdigest()
     return AgentDataset(
         frame=frame,
-        feature_columns=features,
+        feature_columns=tuple(features),
         horizon_bars=horizon,
         dataset_id=f"swing_agent_dataset_{digest}",
         time_start=pd.Timestamp(feature_time.min()).isoformat(),

@@ -7,11 +7,14 @@ from typing import Any
 import numpy as np
 
 from crypto_ai_swing.agents.dataset import DEFAULT_FEATURES
-from crypto_ai_swing.data.features import build_features
+from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
+from crypto_ai_swing.data.features import build_features as legacy_build_features
 
 
 class RLRuntime:
     def __init__(self, settings) -> None:
+        self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         self.root = settings.project_root / "output/crypto_ai_swing/agents/rl"
         self.pointer = self.root / "latest.pointer.json"
         self._mtime = None
@@ -76,8 +79,16 @@ class RLRuntime:
         features = tuple(
             self._manifest.get("feature_columns") or DEFAULT_FEATURES
         )
-        table = build_features(frame).replace([np.inf, -np.inf], np.nan)
-        table = table.dropna(subset=list(features))
+        if self._manifest.get("feature_source") == "canonical_feature_pipeline_v1":
+            table = canonical_model_frame(
+                self.crypto,
+                frame,
+                market=str(frame.attrs.get("market") or "UNKNOWN"),
+                timeframe=str(frame.attrs.get("timeframe") or "1h"),
+                benchmark=None,
+            ).replace([np.inf, -np.inf], np.nan)
+        else:
+            table = legacy_build_features(frame).replace([np.inf, -np.inf], np.nan)
         if table.empty:
             return {
                 **self.status(),
@@ -86,13 +97,15 @@ class RLRuntime:
                 "reason": "NO_COMPLETE_FEATURE_ROW",
             }
 
-        row = table.iloc[-1].loc[list(features)].astype(float)
+        row = table.iloc[-1].reindex(list(features)).astype(float)
         means = self._manifest.get("feature_mean") or {}
         stds = self._manifest.get("feature_std") or {}
         if means and stds:
             mean = np.asarray([float(means.get(name, 0.0)) for name in features])
             std = np.asarray([max(1e-12, float(stds.get(name, 1.0))) for name in features])
-            values = (row.to_numpy(float) - mean) / std
+            raw = row.to_numpy(float)
+            raw = np.where(np.isfinite(raw), raw, mean)
+            values = (raw - mean) / std
             values = np.clip(values, -10.0, 10.0)
         else:
             # Backward compatibility with v2 artifacts.

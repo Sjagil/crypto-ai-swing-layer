@@ -1,9 +1,10 @@
 {
   "automatic_live_promotion": false,
   "branch": "main",
-  "commit": "8cf2eee21d1d3915b4202cda6de97b212574044a",
+  "commit": "5d08369f5d6e13a46d2b49f21064fd71975e9fda",
   "live_requires_clean_checkout": true,
   "live_requires_exact_head": true,
+  "ownership_contract": "config/canonical_ownership.yaml",
   "remote": "https://github.com/Sjagil/crypto.git",
   "repository": "Sjagil/crypto",
   "required_modules": [
@@ -23,6 +24,5 @@
     "scrapers.intelligence"
   ],
   "runtime_root_source": "Settings.crypto_repo_root",
-  "schema_version": "canonical_crypto_engine_lock_v2",
-  "ownership_contract": "config/canonical_ownership.yaml"
+  "schema_version": "canonical_crypto_engine_lock_v2"
 }

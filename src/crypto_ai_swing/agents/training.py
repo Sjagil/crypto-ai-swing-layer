@@ -33,6 +33,7 @@ from crypto_ai_swing.agents.calibration import (
     purged_calibration_selection_split,
 )
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
+from crypto_ai_swing.agents.canonical_features import select_train_only_features
 from crypto_ai_swing.agents.trials import register_trial_family
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
@@ -324,13 +325,24 @@ class AgentTrainer:
             frames,
             horizon_bars=horizon_bars,
             minimum_net_move_bps=minimum_net_move_bps,
+            feature_columns=None,
+            canonical_bridge=self.crypto,
         )
         if len(dataset.frame) < int(minimum_rows):
             raise ValueError(
                 f"insufficient causal rows: {len(dataset.frame)} < {minimum_rows}"
             )
         train, validation, test = purged_chronological_split(dataset)
-        features = dataset.feature_columns
+        features = select_train_only_features(
+            train,
+            dataset.feature_columns,
+            target=train["target_forward_return"],
+            maximum_features=96,
+        )
+        if len(features) < 8:
+            raise ValueError(
+                f"canonical train-only feature selection left {len(features)} features"
+            )
         x_train = train.loc[:, features]
         y_train = train["target_alpha"].astype(int)
         if y_train.nunique() < 2:
@@ -473,6 +485,7 @@ class AgentTrainer:
                 "schema_version": "agent_alpha_tournament_v4",
                 "dataset_id": dataset.dataset_id,
                 "feature_columns": list(features),
+                "feature_source": "canonical_feature_pipeline_v1",
                 "timeframe": timeframe,
                 "horizon_bars": int(horizon_bars),
                 "minimum_net_move_bps": float(minimum_net_move_bps),

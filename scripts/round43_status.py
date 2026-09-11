@@ -38,6 +38,14 @@ def main() -> int:
     )
     latest = _read(root / "latest.json")
     heartbeat = _read(root / "heartbeat.json")
+    round44 = _read(
+        Path(settings.project_root)
+        / "output/crypto_ai_swing/round44/live_readiness.json"
+    )
+    round44_intelligence = _read(
+        Path(settings.project_root)
+        / "output/crypto_ai_swing/round44/latest.json"
+    )
     mode_name = str(latest.get("mode") or "shadow").lower()
     proactive = _read(
         Path(settings.project_root)
@@ -122,6 +130,27 @@ def main() -> int:
                 proactive.get("forward_evidence", {})
                 .get("coverage", {})
                 .get("markets_by_side", {})
+            ),
+            "round44_stage": round44.get("stage"),
+            "round44_next_stage": round44.get("next_stage"),
+            "round44_next_stage_blockers": round44.get("next_stage_blockers"),
+            "round44_technical_ready_markets": (
+                round44_intelligence.get("summary", {}).get(
+                    "technical_ready_markets"
+                )
+            ),
+            "round44_l1_l2_ready_markets": (
+                round44_intelligence.get("summary", {}).get(
+                    "l1_l2_ready_markets"
+                )
+            ),
+            "round44_mdpro_ready_markets": (
+                round44_intelligence.get("summary", {}).get(
+                    "mdpro_ready_markets"
+                )
+            ),
+            "round44_l3_status": (
+                round44_intelligence.get("summary", {}).get("l3")
             ),
             "heartbeat_at": heartbeat.get("heartbeat_at"),
             "automatic_live_authority": False,

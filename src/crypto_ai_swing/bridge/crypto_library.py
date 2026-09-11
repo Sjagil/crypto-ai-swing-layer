@@ -42,6 +42,7 @@ REQUIRED_CRYPTO_MODULES: tuple[str, ...] = (
     "data.data_loader",
     "data.database",
     "data.websocket_manager",
+    "data.bitvavo_market_data_pro",
     "data.orderflow_recorder",
     "data.orderbook_l2",
     "data.bitvavo_l2_reconstruction_v2",

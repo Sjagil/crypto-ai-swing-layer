@@ -10,13 +10,16 @@ import numpy as np
 import pandas as pd
 
 from crypto_ai_swing.agents.council import AgentCouncilDecision, build_council_decision
-from crypto_ai_swing.data.features import build_features
+from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
+from crypto_ai_swing.data.features import build_features as legacy_build_features
 
 
 class AgentRuntime:
     def __init__(self, settings, *, mode: str = "shadow") -> None:
         self.settings = settings
         self.mode = str(mode).lower()
+        self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         self.root = settings.project_root / "output/crypto_ai_swing/agents"
         self.pointer = self.root / "latest.pointer.json"
         self._mtime: float | None = None
@@ -112,9 +115,17 @@ class AgentRuntime:
                     head_qualifications={},
                 )
         features = tuple(bundle.get("feature_columns") or ())
-        feat = build_features(frame).replace([np.inf, -np.inf], np.nan)
-        feat = feat.dropna(subset=list(features))
-        if feat.empty:
+        if bundle.get("feature_source") == "canonical_feature_pipeline_v1":
+            feat = canonical_model_frame(
+                self.crypto,
+                frame,
+                market=str(market).upper(),
+                timeframe=str(bundle.get("timeframe") or frame.attrs.get("timeframe") or "1h"),
+                benchmark=None,
+            ).replace([np.inf, -np.inf], np.nan)
+        else:
+            feat = legacy_build_features(frame).replace([np.inf, -np.inf], np.nan)
+        if feat.empty or not features:
             return build_council_decision(
                 {},
                 context,
@@ -124,7 +135,7 @@ class AgentRuntime:
                 shadow_decision_qualified=False,
                 head_qualifications={},
             )
-        x = feat.iloc[[-1]].loc[:, features]
+        x = feat.iloc[[-1]].reindex(columns=list(features))
         models = dict(bundle.get("models") or {})
         predictions: dict[str, float | None] = {
             "alpha_probability": None,

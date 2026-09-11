@@ -8,20 +8,28 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from crypto_ai_swing.agents.dataset import DEFAULT_FEATURES
+from crypto_ai_swing.agents.canonical_features import (
+    canonical_model_frame,
+    select_train_only_features,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
-from crypto_ai_swing.data.features import build_features
 
 
 CANDIDATE_SEEDS = (17, 29, 43)
 
 
-def _prepare(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    features = (
-        build_features(frame)
-        .replace([np.inf, -np.inf], np.nan)
-        .loc[:, list(DEFAULT_FEATURES)]
-    )
+def _prepare(
+    bridge: CryptoLibraryBridge,
+    market: str,
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.Series]:
+    features = canonical_model_frame(
+        bridge,
+        frame,
+        market=market,
+        timeframe=str(frame.attrs.get("timeframe") or "1h"),
+        benchmark=None,
+    ).replace([np.inf, -np.inf], np.nan)
     next_return = (
         pd.to_numeric(frame["close"], errors="coerce")
         .pct_change()
@@ -30,9 +38,8 @@ def _prepare(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     )
     joined = features.copy()
     joined["__next_return"] = next_return
-    joined = joined.dropna()
-    return joined.loc[:, list(DEFAULT_FEATURES)], joined["__next_return"]
-
+    joined = joined.dropna(subset=["__next_return"])
+    return joined.drop(columns=["__next_return"]), joined["__next_return"]
 
 def _normalize(
     frame: pd.DataFrame,
@@ -251,7 +258,7 @@ class MultiMarketRLTrainer:
         for market, frame in frames.items():
             if frame is None or frame.empty:
                 continue
-            x, r = _prepare(frame)
+            x, r = _prepare(self.crypto, market, frame)
             if len(x) >= minimum_rows_per_market:
                 raw[market] = (x, r)
 
@@ -280,6 +287,27 @@ class MultiMarketRLTrainer:
         if len(train_raw) < 6:
             raise ValueError(f"RL split-usable markets {len(train_raw)} < 6")
 
+        train_matrix_full = pd.concat([x for x, _ in train_raw.values()], axis=0, sort=False)
+        selected_features = select_train_only_features(
+            train_matrix_full,
+            tuple(train_matrix_full.columns),
+            target=None,
+            maximum_features=64,
+        )
+        if len(selected_features) < 8:
+            raise ValueError(
+                f"RL canonical train-only feature selection left {len(selected_features)} features"
+            )
+
+        def align(split):
+            return {
+                market: (x.reindex(columns=list(selected_features)), r.copy())
+                for market, (x, r) in split.items()
+            }
+
+        train_raw = align(train_raw)
+        validation_raw = align(validation_raw)
+        test_raw = align(test_raw)
         train_matrix = pd.concat([x for x, _ in train_raw.values()], axis=0)
         feature_mean = train_matrix.mean(axis=0)
         feature_std = train_matrix.std(axis=0, ddof=0).replace(0.0, 1.0)
@@ -406,7 +434,8 @@ class MultiMarketRLTrainer:
             "candidate_seeds": list(CANDIDATE_SEEDS),
             "candidate_validation": candidate_rows,
             "selected_seed": selected_seed,
-            "feature_columns": list(DEFAULT_FEATURES),
+            "feature_columns": list(selected_features),
+            "feature_source": "canonical_feature_pipeline_v1",
             "feature_mean": {
                 key: float(value)
                 for key, value in feature_mean.items()

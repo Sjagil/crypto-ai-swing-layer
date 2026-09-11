@@ -26,6 +26,7 @@ from crypto_ai_swing.execution.active_swing_canary import (
 )
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
 from crypto_ai_swing.intelligence.cmc_context import CMCContextCollector
+from crypto_ai_swing.intelligence.comprehensive import ComprehensiveIntelligenceEngine
 from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.technical import (
     multi_timeframe_snapshot,
@@ -245,6 +246,7 @@ class ProactiveTrader:
         self.agents = AgentRuntime(settings, mode=self.mode)
         self.rl = RLRuntime(settings)
         self.cmc_context = CMCContextCollector(settings)
+        self.round44 = ComprehensiveIntelligenceEngine(settings)
         self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
         self.strategy_lab = StrategyChallengerLab(
             settings,
@@ -1143,6 +1145,8 @@ class ProactiveTrader:
         prospective_block = prospective_status in {"BLOCK_NEW_ENTRIES", "BLOCKED", "FAILED", "NOT_READY"}
         frames: dict[str, pd.DataFrame] = {}
         forward_frames: dict[str, pd.DataFrame] = {}
+        round44_frames: dict[str, dict[str, pd.DataFrame]] = {}
+        round44_bundles: dict[str, dict[str, Any]] = {}
 
         for market in deep_markets:
             try:
@@ -1158,6 +1162,18 @@ class ProactiveTrader:
                 mtf_frames[primary] = bundle.frame
                 decision_at = observed_at
                 causal_frames = {tf: self.crypto.causal_frame(frame, tf, decision_at) for tf, frame in mtf_frames.items()}
+                round44_frames[market] = {
+                    ("1w" if str(tf) == "1W" else str(tf)): value.copy()
+                    for tf, value in causal_frames.items()
+                    if value is not None and not value.empty
+                }
+                round44_bundles[market] = {
+                    "market": market,
+                    "ticker": dict(bundle.ticker),
+                    "trades": list(bundle.trades),
+                    "orderbook": dict(bundle.orderbook),
+                    "microstructure": dict(bundle.microstructure),
+                }
                 if causal_frames.get(primary) is None or causal_frames[primary].empty:
                     skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_CANDLE"})
                     continue
@@ -1314,6 +1330,30 @@ class ProactiveTrader:
             except Exception as exc:
                 skipped.append({"market": market, "reason": type(exc).__name__, "detail": str(exc)[:300]})
 
+        try:
+            round44_payload = self.round44.build(
+                markets=list(markets),
+                frames=round44_frames,
+                bundles=round44_bundles,
+                context=context,
+                cmc_context=cmc_context,
+                news=self._last_news_status,
+                observed_at=observed_at,
+            )
+        except Exception as exc:
+            round44_payload = {
+                "summary": {
+                    "schema_version": "round44_comprehensive_intelligence_v2",
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                    "automatic_live_authority": False,
+                },
+                "markets": {},
+            }
+        for market, row in dict(round44_payload.get("markets") or {}).items():
+            if market in context:
+                context[market]["round44"] = row
+
         equity, cash, exposure = self._account(markets)
         positions_for_risk = self.state.positions()
         open_risk_eur = sum(
@@ -1435,6 +1475,7 @@ class ProactiveTrader:
             "rally_deep_scan_markets": rally_deep_markets,
             "screen": screen,
             "cmc_context": cmc_context,
+            "round44_comprehensive": round44_payload.get("summary", {}),
             "edge_policy": edge_policy,
             "full_universe_agent_inference": {
                 "market_count": sum(bool(row.get("agent_preview")) for row in screen.values()),

@@ -13,6 +13,9 @@ from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
 from crypto_ai_swing.agents.rl_runtime import RLRuntime
 from crypto_ai_swing.agents.runtime import AgentRuntime
 from crypto_ai_swing.agents.training import AgentTrainer
+from crypto_ai_swing.agents.prospective_context import ProspectiveContextAgent
+from crypto_ai_swing.research.feature_attribution import Round44FeatureAttribution
+from crypto_ai_swing.research.live_readiness import Round44LiveReadiness
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.research.promotion import ResearchPromotionRegistry
 from crypto_ai_swing.universe.runtime import UniverseManager
@@ -55,6 +58,9 @@ class AgentManager:
         self.runtime = runtime or AgentRuntime(settings, mode=self.mode)
         self.rl_trainer = rl_trainer or MultiMarketRLTrainer(settings)
         self.rl_runtime = rl_runtime or RLRuntime(settings)
+        self.round44_context_agent = ProspectiveContextAgent(settings)
+        self.round44_attribution = Round44FeatureAttribution(settings)
+        self.round44_readiness = Round44LiveReadiness(settings)
         self.edge_manager = edge_manager or ResearchEdgeManager(
             settings,
             mode="shadow" if self.mode == "live" else self.mode,
@@ -299,6 +305,77 @@ class AgentManager:
                 )
         else:
             tasks["rl_training"] = {"status": "NOT_DUE"}
+
+        context_due = (
+            forward_database_path is not None
+            and self._due(
+                "last_round44_context_train_at",
+                int(self.cfg.get("round44_context_retrain_seconds", 21600)),
+            )
+        )
+        if context_due:
+            try:
+                tasks["round44_context_training"] = self.round44_context_agent.train(
+                    Path(forward_database_path),
+                    horizon_hours=4,
+                    minimum_rows=int(self.cfg.get("round44_context_minimum_rows", 150)),
+                    minimum_markets=5,
+                    maximum_features=72,
+                )
+                if tasks["round44_context_training"].get("status") != "NO_NEW_EVIDENCE":
+                    self.state["last_round44_context_train_at"] = _now().isoformat()
+            except Exception as exc:
+                errors.append(
+                    {
+                        "task": "round44_context_training",
+                        "error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                    }
+                )
+        else:
+            tasks["round44_context_training"] = {"status": "NOT_DUE_OR_NO_LEDGER"}
+
+        attribution_due = (
+            forward_database_path is not None
+            and self._due(
+                "last_round44_attribution_at",
+                int(self.cfg.get("round44_attribution_seconds", 900)),
+            )
+        )
+        if attribution_due:
+            try:
+                tasks["round44_attribution"] = self.round44_attribution.evaluate(
+                    Path(forward_database_path),
+                    horizons_hours=(1, 4, 24, 72, 168),
+                    minimum_observations=int(
+                        self.cfg.get("round44_attribution_minimum_observations", 60)
+                    ),
+                    maximum_features=80,
+                )
+                self.state["last_round44_attribution_at"] = _now().isoformat()
+            except Exception as exc:
+                errors.append(
+                    {
+                        "task": "round44_attribution",
+                        "error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                    }
+                )
+        else:
+            tasks["round44_attribution"] = {"status": "NOT_DUE_OR_NO_LEDGER"}
+
+        if forward_database_path is not None:
+            try:
+                tasks["round44_readiness"] = self.round44_readiness.evaluate(
+                    Path(forward_database_path)
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "task": "round44_readiness",
+                        "error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                    }
+                )
+        else:
+            tasks["round44_readiness"] = {"status": "NO_FORWARD_LEDGER"}
 
         edge_due = self._due(
             "last_edge_refresh_at",
