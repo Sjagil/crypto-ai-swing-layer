@@ -1,4 +1,4 @@
-schema: crypto_ai_swing_autonomy_v4
+schema: crypto_ai_swing_autonomy_v6
 control_plane:
   fail_closed: true
   automatic_live_promotion: false
@@ -228,3 +228,111 @@ live_lifecycle:
   trailing_stop_uses_canonical_exit: true
   post_submit_reconciliation_required: true
   automatic_live_authority: false
+
+
+round43_automation:
+  enabled: true
+  default_mode: shadow
+  allowed_modes:
+    - shadow
+    - paper
+  allow_live_mode: false
+  cycle_seconds: 300
+  heartbeat_seconds: 30
+  evidence_maturation_seconds: 900
+  crash_backoff_seconds: 15
+  runtime_lock_stale_seconds: 1800
+  persistent_service: launchd
+  run_at_login: true
+  automatic_restart: true
+  automatic_live_authority: false
+  automatic_live_promotion: false
+
+evidence_maturation:
+  enabled: true
+  refresh_seconds: 900
+  maximum_markets_per_maturation_cycle: 40
+  fetch_concurrency: 4
+  minimum_complete_horizon_observations_for_optimization: 72
+  causal_reference_required: true
+  synthetic_sample_multiplication: false
+  closed_candles_only: true
+  automatic_live_authority: false
+  automatic_live_promotion: false
+
+drift_monitor:
+  enabled: true
+  refresh_seconds: 900
+  maximum_observation_staleness_hours: 2.0
+  maximum_external_research_staleness_hours: 2.0
+  maximum_attribution_staleness_hours: 2.0
+  maximum_primary_maturation_backlog: 20
+  threshold_relaxation_allowed: false
+  risk_widening_allowed: false
+  automatic_live_authority: false
+  automatic_live_promotion: false
+
+optimization_controller:
+  enabled: true
+  minimum_new_primary_outcomes_for_research: 20
+  research_cooldown_seconds: 21600
+  minimum_complete_horizon_observations_for_exact: 72
+  minimum_new_complete_horizon_observations_for_exact: 20
+  exact_research_cooldown_seconds: 86400
+  minimum_complete_horizon_observations_for_optuna: 72
+  minimum_new_complete_horizon_observations_for_optuna: 12
+  selector_optuna_cooldown_seconds: 86400
+  selector_optuna_trials: 40
+  selector_optuna_study_name: prospective-swing-entry-selector-round43
+  selector_optuna_seed: 43
+  selector_optuna_inner_folds: 3
+  force_train_cooldown_seconds: 14400
+  external_research_cooldown_seconds: 900
+  heavy_work_is_evidence_triggered: true
+  bounded_compute: true
+  full_costs_required: true
+  benchmark_relative_evidence_required: true
+  point_in_time_universe_required: true
+  multiple_testing_control_required: true
+  stochastic_validation_required: true
+  threshold_relaxation_allowed: false
+  risk_widening_allowed: false
+  automatic_live_authority: false
+  automatic_live_promotion: false
+
+paper_economics:
+  enabled: true
+  refresh_seconds: 300
+  maximum_new_closed_trades_per_refresh: 24
+  minimum_closed_trades_for_diagnostics: 10
+  minimum_closed_trades_for_qualification: 30
+  minimum_strategy_closed_trades: 8
+  minimum_profit_factor: 1.15
+  minimum_payoff_ratio: 1.05
+  maximum_realized_drawdown_fraction: 0.20
+  minimum_complete_long_horizon_observations: 30
+  swing_horizons_hours:
+    - 4
+    - 24
+    - 72
+    - 168
+  swing_horizon_weights:
+    "4": 0.10
+    "24": 0.35
+    "72": 0.35
+    "168": 0.20
+  objective: risk_adjusted_compounded_net_active_swing_pnl
+  full_estimated_costs_required: true
+  live_decision_influence: false
+  automatic_live_authority: false
+  automatic_live_promotion: false
+
+economic_optimizer:
+  enabled: true
+  minimum_closed_trades: 10
+  force_train_cooldown_seconds: 14400
+  force_research_cooldown_seconds: 21600
+  threshold_relaxation_allowed: false
+  risk_widening_allowed: false
+  automatic_live_authority: false
+  automatic_live_promotion: false

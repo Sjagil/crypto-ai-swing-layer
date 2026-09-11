@@ -1,0 +1,59 @@
+name: round43-ci
+
+on:
+  push:
+    branches:
+      - feature/production-canonical-runtime-v2-43
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  round43-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Checkout pinned canonical crypto
+        shell: bash
+        run: |
+          CRYPTO_COMMIT="$(python -c 'import json; print(json.load(open("config/canonical_crypto_engine.json"))["commit"])')"
+          git clone --quiet https://github.com/Sjagil/crypto.git "$GITHUB_WORKSPACE/crypto"
+          git -C "$GITHUB_WORKSPACE/crypto" checkout --quiet "$CRYPTO_COMMIT"
+          echo "CRYPTO_REPO_PATH=$GITHUB_WORKSPACE/crypto" >> "$GITHUB_ENV"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,crypto-runtime]'
+      - name: Round43 lint
+        run: |
+          python -m compileall -q src scripts tests
+          python -m ruff check \
+            src/crypto_ai_swing/research/evidence_maturation.py \
+            src/crypto_ai_swing/monitoring/research_drift.py \
+            src/crypto_ai_swing/monitoring/__init__.py \
+            src/crypto_ai_swing/research/optimization_controller.py \
+            src/crypto_ai_swing/research/paper_economics.py \
+            src/crypto_ai_swing/research/economic_optimizer.py \
+            src/crypto_ai_swing/orchestration/round43_controller.py \
+            scripts/round43_runtime.py \
+            scripts/round43_status.py \
+            scripts/round43_launchd.py \
+            tests/test_round43_evidence_maturation.py \
+            tests/test_round43_optimization_controller.py \
+            tests/test_round43_safety_contract.py
+      - name: Round43 contracts
+        run: |
+          python -m pytest -q \
+            tests/test_round43_evidence_maturation.py \
+            tests/test_round43_optimization_controller.py \
+            tests/test_round43_safety_contract.py \
+            tests/test_round43_paper_economics.py \
+            tests/test_round43_economic_optimizer.py \
+            tests/test_round42_chief_contract.py \
+            tests/test_round42_performance_governor.py \
+            tests/test_round28_optuna_runtime.py
+          python scripts/round43_status.py --compact

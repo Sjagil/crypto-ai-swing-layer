@@ -711,8 +711,11 @@ class ProactiveTrader:
                         intent.estimated_round_trip_cost_bps
                     ),
                     "net_edge_bps": str(intent.net_edge_bps),
+                    "stop_pct": float(intent.stop_pct),
+                    "take_profit_pct": float(intent.take_profit_pct),
+                    "trailing_stop_pct": float(intent.trailing_stop_pct),
                     "intent_metadata": intent.metadata,
-                    "attribution_schema": "paper_intent_context_v1",
+                    "attribution_schema": "paper_intent_context_v2",
                 },
             )
 
