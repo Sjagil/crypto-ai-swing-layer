@@ -97,6 +97,8 @@ def selector_feature_vector(context: Mapping[str, Any]) -> dict[str, float | Non
 
     mtf = val("mtf")
     technical = val("technical")
+    alpha = val("alpha")
+    cmc = val("cmc")
     execution = val("execution")
     macro = val("mtf_macro")
     trend = val("mtf_trend")
@@ -112,6 +114,21 @@ def selector_feature_vector(context: Mapping[str, Any]) -> dict[str, float | Non
             "interaction_mtf_technical": (
                 mtf * technical
                 if mtf is not None and technical is not None
+                else None
+            ),
+            "interaction_alpha_technical": (
+                alpha * technical
+                if alpha is not None and technical is not None
+                else None
+            ),
+            "interaction_alpha_mtf": (
+                alpha * mtf
+                if alpha is not None and mtf is not None
+                else None
+            ),
+            "interaction_alpha_cmc": (
+                alpha * cmc
+                if alpha is not None and cmc is not None
                 else None
             ),
             "interaction_mtf_execution": (
@@ -148,6 +165,9 @@ def selector_feature_vector(context: Mapping[str, Any]) -> dict[str, float | Non
 
 SELECTOR_FEATURES = tuple(BASE_FEATURES) + (
     "interaction_mtf_technical",
+    "interaction_alpha_technical",
+    "interaction_alpha_mtf",
+    "interaction_alpha_cmc",
     "interaction_mtf_execution",
     "interaction_macro_trend",
     "interaction_setup_trigger",

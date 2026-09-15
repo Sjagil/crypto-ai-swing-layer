@@ -26,10 +26,10 @@ def test_proactive_execution_validation_uses_level2_order_cap() -> None:
         (ROOT / "config" / "proactive.yaml").read_text(encoding="utf-8")
     )
     policy = config["active_swing"]["execution_validation_canary"]
-    assert policy["maximum_order_eur"] == 25.0
+    assert policy["maximum_order_eur"] == 10.0
     assert policy["manual_authority_required"] is True
     assert policy["prospective_evidence_required_for_scaling"] is True
-    assert policy["autoscale"] is False
+    assert policy["autoscale"] is True
 
 
 def test_optuna_reference_worker_is_pinned_to_major_four() -> None:

@@ -99,21 +99,32 @@ def build_agent_dataset(
         mae = (1.0 - future_low / ohlcv["close"]).clip(lower=0.0)
         mfe = (future_high / ohlcv["close"] - 1.0).clip(lower=0.0)
         threshold = float(minimum_net_move_bps) / 10_000.0
+        past_return = ohlcv["close"] / ohlcv["close"].shift(horizon) - 1.0
+        net_return = forward_return - threshold
+        path_quality = ((mfe - mae) / (mfe + mae + 1e-9)).clip(-1.0, 1.0)
+        regime_persistence = (
+            (past_return * forward_return > 0.0)
+            & (forward_return.abs() >= threshold * 0.50)
+        )
 
         item = selected
         item["target_forward_return"] = forward_return
+        item["target_net_return"] = net_return
         item["target_mae"] = mae
         item["target_mfe"] = mfe
-        item["target_alpha"] = (forward_return > threshold).astype(float)
-        item["target_regime_persistence"] = ((forward_return > 0) & (mfe > mae)).astype(float)
+        item["target_path_quality"] = path_quality
+        item["target_alpha"] = (net_return > 0.0).astype(float)
+        item["target_regime_persistence"] = regime_persistence.astype(float)
         item["market"] = str(market).upper()
         item["feature_time"] = item.index
         item["label_end_time"] = item.index.to_series().shift(-horizon)
         item = item.iloc[:-horizon] if len(item) > horizon else item.iloc[0:0]
         target_columns = [
             "target_forward_return",
+            "target_net_return",
             "target_mae",
             "target_mfe",
+            "target_path_quality",
             "target_alpha",
             "target_regime_persistence",
             "label_end_time",
@@ -133,7 +144,10 @@ def build_agent_dataset(
         frame[[
             *features,
             "target_forward_return",
+            "target_net_return",
             "target_mae",
+            "target_mfe",
+            "target_path_quality",
             "target_regime_persistence",
             "market",
             "feature_time",

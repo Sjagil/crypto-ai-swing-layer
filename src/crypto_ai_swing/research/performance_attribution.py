@@ -15,6 +15,7 @@ from crypto_ai_swing.agents.component_features import (
     COMPONENTS,
     extract_components,
     extract_descriptors,
+    extract_research_components,
 )
 
 
@@ -29,6 +30,40 @@ def _seed(label: str) -> int:
 def _finite(values: list[float] | np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
     return arr[np.isfinite(arr)]
+
+
+def _safe_spearman(
+    values: np.ndarray,
+    outcomes: np.ndarray,
+) -> tuple[float, bool]:
+    x = np.asarray(values, dtype=float).reshape(-1)
+    y = np.asarray(outcomes, dtype=float).reshape(-1)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+
+    if len(x) < 4:
+        return 0.0, False
+    if np.unique(x).size < 2 or np.unique(y).size < 2:
+        return 0.0, False
+
+    x_std = float(np.std(x, ddof=1))
+    y_std = float(np.std(y, ddof=1))
+    if (
+        not np.isfinite(x_std)
+        or not np.isfinite(y_std)
+        or x_std <= 1e-12
+        or y_std <= 1e-12
+    ):
+        return 0.0, False
+
+    corr = pd.Series(x).corr(
+        pd.Series(y),
+        method="spearman",
+    )
+    if corr is None or not np.isfinite(corr):
+        return 0.0, False
+    return float(corr), True
 
 
 def bayesian_mean_posterior(
@@ -133,7 +168,7 @@ class PerformanceAttributionEngine:
     intents when available. It never changes live authority.
     """
 
-    SCHEMA = "crypto_ai_swing_performance_attribution_v1"
+    SCHEMA = "crypto_ai_swing_performance_attribution_v2"
 
     def __init__(self, settings, *, mode: str = "paper") -> None:
         self.settings = settings
@@ -235,7 +270,9 @@ class PerformanceAttributionEngine:
                 "stressed_cost_bps": stressed_cost,
                 "normal_net_bps": gross - normal_cost,
                 "stressed_net_bps": gross - stressed_cost,
-                "components": extract_components(context),
+                "components": extract_research_components(context),
+                "live_eligible_components": extract_components(context),
+                "component_scope": "RESEARCH_OBSERVABILITY_ONLY",
                 "descriptors": extract_descriptors(context),
             })
         return output
@@ -278,7 +315,10 @@ class PerformanceAttributionEngine:
                 continue
             v = values[mask].to_numpy(dtype=float)
             y = returns[mask].to_numpy(dtype=float)
-            corr = pd.Series(v).corr(pd.Series(y), method="spearman")
+            corr, correlation_defined = _safe_spearman(
+                v,
+                y,
+            )
             median = float(np.median(v))
             high = y[v >= median]
             low = y[v < median]
@@ -292,9 +332,9 @@ class PerformanceAttributionEngine:
                 "status": "READY",
                 "observations": count,
                 "coverage_fraction": count / max(1, len(rows)),
-                "spearman_ic": (
-                    float(corr) if corr is not None and np.isfinite(corr) else 0.0
-                ),
+                "spearman_ic": float(corr),
+                "correlation_defined": bool(correlation_defined),
+                "component_scope": "RESEARCH_OBSERVABILITY_ONLY",
                 "median_split": median,
                 "high": _summary(high),
                 "low": _summary(low),

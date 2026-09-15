@@ -244,7 +244,7 @@ class ProactiveTrader:
             decision_bucket_minutes=int(forward_cfg.get("decision_bucket_minutes", 15)),
         )
         self.agents = AgentRuntime(settings, mode=self.mode)
-        self.rl = RLRuntime(settings)
+        self.rl = RLRuntime(settings, mode=self.mode)
         self.cmc_context = CMCContextCollector(settings)
         self.round44 = ComprehensiveIntelligenceEngine(settings)
         self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
@@ -639,7 +639,11 @@ class ProactiveTrader:
                 "execution_validation_canary": validation_canary,
                 "economic_edge_unproven": validation_canary,
                 "alpha_evidence_authorized": False,
-                "autoscale_authorized": False,
+                "autoscale_authorized": bool(
+                    (getattr(intent, "metadata", None) or {}).get(
+                        "autoscale_authorized", False
+                    )
+                ),
                 "prospective_readiness": readiness,
                 "canonical_preflight": preflight,
                 **guarded,
@@ -1294,11 +1298,22 @@ class ProactiveTrader:
                 )
                 rl_cfg = dict(self.settings.agents.get('rl', {}) or {})
                 context[market]["rl_score"] = (
-                    float(rl_preview['score'])
-                    if self.mode != 'live'
-                    and bool(rl_cfg.get('shadow_signal_influence', True))
-                    and bool(rl_preview.get('qualified', False))
-                    and rl_preview.get('score') is not None
+                    float(rl_preview["score"])
+                    if (
+                        (
+                            self.mode != "live"
+                            and bool(rl_cfg.get("shadow_signal_influence", True))
+                        )
+                        or (
+                            self.mode == "live"
+                            and bool(rl_cfg.get("live_decision_influence", True))
+                            and bool(
+                                rl_preview.get("live_decision_influence", False)
+                            )
+                        )
+                    )
+                    and bool(rl_preview.get("qualified", False))
+                    and rl_preview.get("score") is not None
                     else None
                 )
                 mtf_challenger = evaluate_mtf_challenger(

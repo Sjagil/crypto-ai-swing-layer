@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,24 @@ class ChiefAgent:
         force_exact_research: bool = False,
         browser_research: bool | None = None,
     ) -> dict[str, Any]:
+        if (
+            bool(
+                (getattr(self.settings, "supervisor", {}) or {}).get(
+                    "external_learning_worker", False
+                )
+            )
+            and os.getenv("CRYPTO_SWING_LEARNING_PROCESS") != "1"
+        ):
+            return {
+                "schema_version": self.SCHEMA,
+                "generated_at": datetime.now(UTC).isoformat(),
+                "status": "EXTERNALIZED_TO_LEARNING_WORKER",
+                "mode": self.mode,
+                "markets": markets,
+                "continuous_improvement_loop": True,
+                "orders_generated": 0,
+                "orders_submitted": 0,
+            }
         tasks: dict[str, Any] = {}
         errors: list[dict[str, str]] = []
 

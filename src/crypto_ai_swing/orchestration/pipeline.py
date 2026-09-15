@@ -339,7 +339,21 @@ class SwingPipeline:
                     "economic_edge_unproven": bool(canary_allowed),
                     "alpha_evidence_authorized": False,
                     "automatic_live_promotion": False,
-                    "autoscale_authorized": False,
+                    "autoscale_authorized": bool(
+                        canary_allowed
+                        and (
+                            (
+                                self.settings.proactive.get(
+                                    "active_swing", {}
+                                )
+                                or {}
+                            )
+                            .get(
+                                "execution_validation_canary", {}
+                            )
+                            .get("autoscale", False)
+                        )
+                    ),
                     "risk_authority": (
                         "Sjagil/crypto:risk.risk_manager.RiskManager"
                     ),

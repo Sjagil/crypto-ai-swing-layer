@@ -189,8 +189,7 @@ class ModeController:
             blockers.append("EXECUTION_VALIDATION_NOTIONAL_CAP_INVALID")
         if bool(canary.get("alpha_evidence_authorized", False)):
             blockers.append("ALPHA_AUTHORITY_FORBIDDEN_FOR_EXECUTION_CANARY")
-        if bool(canary.get("autoscale", False)):
-            blockers.append("AUTOSCALE_FORBIDDEN_FOR_EXECUTION_CANARY")
+        adaptive_autoscale = bool(canary.get("autoscale", False))
 
         return {
             "schema_version": (
@@ -210,7 +209,10 @@ class ModeController:
                 )
             ),
             "alpha_evidence_authorized": False,
-            "autoscale": False,
+            "autoscale": adaptive_autoscale,
+            "adaptive_order_sizing": adaptive_autoscale,
+            "hard_cap_autoscaling": False,
+            "hard_cap_growth_requires_prospective_evidence": True,
             "high_frequency_trading": False,
         }
 

@@ -35,6 +35,7 @@ from crypto_ai_swing.agents.calibration import (
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.agents.canonical_features import select_train_only_features
 from crypto_ai_swing.agents.trials import register_trial_family
+from crypto_ai_swing.agents.hpo import HPOModelFactory
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
     native_model_selection_evidence,
@@ -247,6 +248,65 @@ def _threshold_plan(
     }
 
 
+def _economic_sample_weight(
+    frame: pd.DataFrame,
+    *,
+    cost_floor: float,
+) -> np.ndarray:
+    realized = frame["target_forward_return"].to_numpy(float)
+    mae = frame["target_mae"].to_numpy(float)
+    mfe = frame["target_mfe"].to_numpy(float)
+    net = realized - float(cost_floor)
+
+    scale = np.clip(
+        np.abs(net) / max(float(cost_floor), 1e-4),
+        0.0,
+        3.0,
+    )
+    quality = np.clip(
+        (mfe - mae) / (mfe + mae + 1e-9),
+        0.0,
+        1.0,
+    )
+
+    return np.clip(
+        1.0
+        + 0.35 * np.sqrt(scale)
+        + 0.25 * quality * (net > 0.0),
+        0.75,
+        2.50,
+    )
+
+
+def _fit_classifier_weighted(
+    model,
+    x,
+    y,
+    weights,
+):
+    weights = np.asarray(weights, dtype=float)
+
+    if hasattr(model, "steps") and getattr(model, "steps", None):
+        step_name = model.steps[-1][0]
+        try:
+            return model.fit(
+                x,
+                y,
+                **{f"{step_name}__sample_weight": weights},
+            )
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        return model.fit(
+            x,
+            y,
+            sample_weight=weights,
+        )
+    except (TypeError, ValueError):
+        return model.fit(x, y)
+
+
 def _direction_accuracy(actual: np.ndarray, predicted: np.ndarray) -> float:
     a = np.asarray(actual, dtype=float)
     p = np.asarray(predicted, dtype=float)
@@ -365,6 +425,10 @@ class AgentTrainer:
         val_realized = validation["target_forward_return"].to_numpy(float)
         cost_floor = float(minimum_net_move_bps) / 10_000.0
 
+        alpha_train_weights = _economic_sample_weight(train, cost_floor=cost_floor)
+        return_clip_low = float(train["target_forward_return"].quantile(0.005))
+        return_clip_high = float(train["target_forward_return"].quantile(0.995))
+        robust_return_train = train["target_forward_return"].clip(return_clip_low, return_clip_high)
         calibration_cfg = dict(
             (getattr(self.settings, "agents", {}) or {}).get(
                 "calibration", {}
@@ -389,11 +453,19 @@ class AgentTrainer:
         ].to_numpy(float)
         selection_markets = selection_frame["market"].astype(str).to_numpy()
 
+        hpo_factory = HPOModelFactory(
+            self.settings,
+            timeframe=timeframe,
+            horizon_bars=horizon_bars,
+        )
         candidates = {
             "hist_gradient_boosting": _hist_classifier(),
             "logistic_balanced": _logistic_classifier(),
             "extra_trees": _extra_trees_classifier(),
         }
+        hpo_alpha = hpo_factory.alpha_candidate()
+        if hpo_alpha is not None:
+            candidates["optuna_hpo_alpha"] = hpo_alpha
         calibration_methods = tuple(
             str(value).strip().lower()
             for value in calibration_cfg.get(
@@ -411,7 +483,12 @@ class AgentTrainer:
         threshold_rows: dict[str, list[dict[str, Any]]] = {}
 
         for model_name, model in candidates.items():
-            model.fit(x_train, y_train)
+            _fit_classifier_weighted(
+                model,
+                x_train,
+                y_train,
+                alpha_train_weights,
+            )
             raw_calibration = model.predict_proba(x_calibration)[:, 1]
             for calibration_method in calibration_methods:
                 calibrator = fit_probability_calibrator(
@@ -523,12 +600,18 @@ class AgentTrainer:
         alpha = fitted[winner_key]
         threshold = float(winner_row["threshold_plan"]["chosen"]["threshold"])
 
-        regime = _hist_classifier().fit(
+        regime_model = hpo_factory.regime_model() or _hist_classifier()
+        return_model = hpo_factory.return_model() or _regressor()
+        risk_quantile = 0.75
+        risk_model = (
+            hpo_factory.risk_model(quantile=risk_quantile)
+            or _regressor(quantile=risk_quantile)
+        )
+        regime = regime_model.fit(
             x_train, train["target_regime_persistence"].astype(int)
         )
-        ret = _regressor().fit(x_train, train["target_forward_return"])
-        risk_quantile = 0.75
-        risk = _regressor(quantile=risk_quantile).fit(x_train, train["target_mae"])
+        ret = return_model.fit(x_train, robust_return_train)
+        risk = risk_model.fit(x_train, train["target_mae"])
 
         x_test = test.loc[:, features]
         alpha_p = alpha.predict_proba(x_test)[:, 1]
@@ -762,6 +845,7 @@ class AgentTrainer:
             "head_qualifications": head_qualifications,
             "shadow_decision_qualified": directional_qualified,
             "model_tournament": tournament,
+            "hpo": hpo_factory.summary(),
             "chronological": True,
             "purged": True,
             "purge_bars": int(dataset.horizon_bars),

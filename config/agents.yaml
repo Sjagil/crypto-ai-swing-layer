@@ -8,8 +8,8 @@ minimum_rows: 8000
 minimum_net_move_bps: 65.0
 artifact_status_after_training: SHADOW
 shadow_decision_requires_oos_qualification: true
-live_decision_influence: false
-automatic_canary_promotion: false
+live_decision_influence: true
+automatic_canary_promotion: true
 automatic_active_promotion: false
 qualification:
   minimum_validation_selected: 40
@@ -43,20 +43,23 @@ rl:
   long_only: true
   leverage: false
   shorting: false
-  live_decision_influence: false
+  live_decision_influence: true
   timeframe: 1h
-  total_timesteps: 50000
+  total_timesteps: 120000
   minimum_rows_per_market: 900
   retrain_seconds: 86400
   spot_only: true
   shadow_signal_influence: true
-  automatic_live_promotion: false
+  automatic_live_promotion: true
   candidate_seeds:
   - 17
   - 29
   - 43
   validation_fraction: 0.2
   final_test_fraction: 0.2
+  minimum_hold_bars: 6
+  cooldown_bars: 2
+  reward_version: swing_cost_aware_incremental_drawdown_v1
 research_agent_panel:
   enabled: true
   authority: ADVISORY_ONLY
@@ -104,7 +107,6 @@ edge_manager:
   minimum_profit_factor: 1.2
   minimum_payoff_ratio: 1.1
   require_swing_geometry: true
-
 manager:
   enabled: true
   check_seconds: 60
@@ -115,6 +117,44 @@ manager:
   stale_lock_seconds: 21600
   retrain_missing_or_expired_immediately: true
   continuous_monitoring: true
-  live_decision_influence: false
+  live_decision_influence: true
   automatic_live_authority: false
-  automatic_model_live_promotion: false
+  automatic_model_live_promotion: true
+hpo:
+  enabled: true
+  rl_enabled: true
+  backprop_mlp_enabled: true
+  seed: 43
+  fetch_concurrency: 4
+  maximum_features: 96
+  rl_maximum_features: 64
+  timeout_seconds_per_head: 1200
+  rl_timeout_seconds: 5400
+  rl_trial_timesteps: 25000
+  rl_trials_per_run: 10
+  maximum_state_age_hours: 168
+  trials_per_run:
+    alpha: 20
+    regime: 16
+    return: 20
+    risk: 12
+live_promotion:
+  enabled: true
+  supervised_enabled: true
+  rl_enabled: true
+  minimum_supervised_rows: 8000
+  minimum_promotion_score_delta: 0.0
+  minimum_rl_promotion_score_delta: 0.0
+  promotion_status: CANARY
+  model_influence_only: true
+  may_grant_execution_authority: false
+  may_change_capital_caps: false
+continuous_learning:
+  enabled: true
+  cycle_seconds: 60
+  hpo_refresh_seconds: 43200
+  rl_hpo_refresh_seconds: 86400
+  continuous_data_consumption: true
+  continuous_backtesting: true
+  continuous_model_training: true
+  qualified_models_have_live_influence: true

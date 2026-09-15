@@ -73,6 +73,8 @@ strategy_lab:
   candidate_freeze_required: true
   automatic_live_promotion: false
   live_decision_influence: false
+  minimum_selection_fraction: 0.08
+  maximum_selection_fraction: 0.75
 net_edge_calibration:
   enabled: true
   refresh_seconds: 900
@@ -134,7 +136,6 @@ swing_geometry:
   - 500
   live_decision_influence: false
   automatic_live_promotion: false
-
 entry_selector:
   enabled: true
   refresh_seconds: 900
@@ -228,14 +229,12 @@ live_lifecycle:
   trailing_stop_uses_canonical_exit: true
   post_submit_reconciliation_required: true
   automatic_live_authority: false
-
-
 round43_automation:
   enabled: true
   default_mode: shadow
   allowed_modes:
-    - shadow
-    - paper
+  - shadow
+  - paper
   allow_live_mode: false
   cycle_seconds: 300
   heartbeat_seconds: 30
@@ -247,7 +246,6 @@ round43_automation:
   automatic_restart: true
   automatic_live_authority: false
   automatic_live_promotion: false
-
 evidence_maturation:
   enabled: true
   refresh_seconds: 900
@@ -259,7 +257,6 @@ evidence_maturation:
   closed_candles_only: true
   automatic_live_authority: false
   automatic_live_promotion: false
-
 drift_monitor:
   enabled: true
   refresh_seconds: 900
@@ -271,7 +268,6 @@ drift_monitor:
   risk_widening_allowed: false
   automatic_live_authority: false
   automatic_live_promotion: false
-
 optimization_controller:
   enabled: true
   minimum_new_primary_outcomes_for_research: 20
@@ -299,7 +295,6 @@ optimization_controller:
   risk_widening_allowed: false
   automatic_live_authority: false
   automatic_live_promotion: false
-
 paper_economics:
   enabled: true
   refresh_seconds: 300
@@ -309,24 +304,23 @@ paper_economics:
   minimum_strategy_closed_trades: 8
   minimum_profit_factor: 1.15
   minimum_payoff_ratio: 1.05
-  maximum_realized_drawdown_fraction: 0.20
+  maximum_realized_drawdown_fraction: 0.2
   minimum_complete_long_horizon_observations: 30
   swing_horizons_hours:
-    - 4
-    - 24
-    - 72
-    - 168
+  - 4
+  - 24
+  - 72
+  - 168
   swing_horizon_weights:
-    "4": 0.10
-    "24": 0.35
-    "72": 0.35
-    "168": 0.20
+    '4': 0.1
+    '24': 0.35
+    '72': 0.35
+    '168': 0.2
   objective: risk_adjusted_compounded_net_active_swing_pnl
   full_estimated_costs_required: true
   live_decision_influence: false
   automatic_live_authority: false
   automatic_live_promotion: false
-
 economic_optimizer:
   enabled: true
   minimum_closed_trades: 10

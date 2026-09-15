@@ -38,6 +38,7 @@ from .orchestration.health import runtime_health
 from .orchestration.pipeline import SwingPipeline
 from .orchestration.proactive import ProactiveTrader
 from .orchestration.supervisor import AutonomousSupervisor
+from .orchestration.learning_worker import ContinuousLearningWorker
 from crypto_ai_swing.orchestration.unified_runtime import UnifiedAutonomyRuntime
 from .research.bootstrap import ColdStartResearchRunner
 from .research.forward import ForwardEvidenceLedger
@@ -1955,3 +1956,17 @@ def native_alpha_tournament(
 
 if __name__ == "__main__":
     app()
+
+@app.command("learning-worker")
+def learning_worker(
+    mode: str = typer.Option("live", help="shadow, paper, or live"),
+    once: bool = typer.Option(False),
+) -> None:
+    if mode not in {"shadow", "paper", "live"}:
+        raise typer.BadParameter("invalid mode")
+    worker = ContinuousLearningWorker(_settings(), mode=mode)
+    if once:
+        console.print_json(json.dumps(worker.run_once(), default=str))
+        return
+    worker.run_forever()
+

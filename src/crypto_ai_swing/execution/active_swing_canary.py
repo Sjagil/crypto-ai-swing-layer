@@ -75,7 +75,7 @@ def evaluate_execution_validation_canary(
         "alpha_evidence_authorized": False,
         "alpha_promotion_authorized": False,
         "prospective_evidence_required_for_scaling": True,
-        "autoscale_authorized": False,
+        "autoscale_authorized": bool(cfg.get("autoscale", False)),
     }
 
 
