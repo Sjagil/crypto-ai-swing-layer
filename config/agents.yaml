@@ -31,6 +31,14 @@ qualification:
   stochastic_simulations: 10000
   historical_trial_floor: 33
   require_point_in_time_universe_for_alpha: true
+label_noise:
+  enabled: true
+  boundary_band_fraction_of_cost: 0.25
+  minimum_band_bps: 10.0
+  maximum_band_bps: 30.0
+  minimum_confidence: 0.05
+  confidence_power: 1.35
+  fallback_min_weight: 0.25
 calibration:
   methods:
   - raw

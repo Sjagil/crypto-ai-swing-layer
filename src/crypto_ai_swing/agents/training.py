@@ -36,6 +36,13 @@ from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronolog
 from crypto_ai_swing.agents.canonical_features import select_train_only_features
 from crypto_ai_swing.agents.trials import register_trial_family
 from crypto_ai_swing.agents.hpo import HPOModelFactory
+from crypto_ai_swing.agents.label_noise import (
+    LABEL_NOISE_VERSION,
+    alpha_label_noise_summary,
+    economic_alpha_sample_weight,
+    fit_weighted_or_confident_subset,
+    resolve_label_noise_policy,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
     native_model_selection_evidence,
@@ -252,29 +259,12 @@ def _economic_sample_weight(
     frame: pd.DataFrame,
     *,
     cost_floor: float,
+    label_noise_cfg: dict[str, Any] | None = None,
 ) -> np.ndarray:
-    realized = frame["target_forward_return"].to_numpy(float)
-    mae = frame["target_mae"].to_numpy(float)
-    mfe = frame["target_mfe"].to_numpy(float)
-    net = realized - float(cost_floor)
-
-    scale = np.clip(
-        np.abs(net) / max(float(cost_floor), 1e-4),
-        0.0,
-        3.0,
-    )
-    quality = np.clip(
-        (mfe - mae) / (mfe + mae + 1e-9),
-        0.0,
-        1.0,
-    )
-
-    return np.clip(
-        1.0
-        + 0.35 * np.sqrt(scale)
-        + 0.25 * quality * (net > 0.0),
-        0.75,
-        2.50,
+    return economic_alpha_sample_weight(
+        frame,
+        cost_floor=cost_floor,
+        config=label_noise_cfg,
     )
 
 
@@ -283,28 +273,16 @@ def _fit_classifier_weighted(
     x,
     y,
     weights,
+    *,
+    fallback_min_weight: float = 0.25,
 ):
-    weights = np.asarray(weights, dtype=float)
-
-    if hasattr(model, "steps") and getattr(model, "steps", None):
-        step_name = model.steps[-1][0]
-        try:
-            return model.fit(
-                x,
-                y,
-                **{f"{step_name}__sample_weight": weights},
-            )
-        except (TypeError, ValueError):
-            pass
-
-    try:
-        return model.fit(
-            x,
-            y,
-            sample_weight=weights,
-        )
-    except (TypeError, ValueError):
-        return model.fit(x, y)
+    return fit_weighted_or_confident_subset(
+        model,
+        x,
+        y,
+        weights,
+        fallback_min_weight=fallback_min_weight,
+    )
 
 
 def _direction_accuracy(actual: np.ndarray, predicted: np.ndarray) -> float:
@@ -425,7 +403,23 @@ class AgentTrainer:
         val_realized = validation["target_forward_return"].to_numpy(float)
         cost_floor = float(minimum_net_move_bps) / 10_000.0
 
-        alpha_train_weights = _economic_sample_weight(train, cost_floor=cost_floor)
+        label_noise_cfg = dict(
+            (getattr(self.settings, "agents", {}) or {}).get(
+                "label_noise", {}
+            )
+            or {}
+        )
+        label_noise_policy = resolve_label_noise_policy(label_noise_cfg)
+        label_noise_summary = alpha_label_noise_summary(
+            train,
+            cost_floor=cost_floor,
+            config=label_noise_cfg,
+        )
+        alpha_train_weights = _economic_sample_weight(
+            train,
+            cost_floor=cost_floor,
+            label_noise_cfg=label_noise_cfg,
+        )
         return_clip_low = float(train["target_forward_return"].quantile(0.005))
         return_clip_high = float(train["target_forward_return"].quantile(0.995))
         robust_return_train = train["target_forward_return"].clip(return_clip_low, return_clip_high)
@@ -488,6 +482,9 @@ class AgentTrainer:
                 x_train,
                 y_train,
                 alpha_train_weights,
+                fallback_min_weight=(
+                    label_noise_policy.fallback_min_weight
+                ),
             )
             raw_calibration = model.predict_proba(x_calibration)[:, 1]
             for calibration_method in calibration_methods:
@@ -566,6 +563,8 @@ class AgentTrainer:
                 "timeframe": timeframe,
                 "horizon_bars": int(horizon_bars),
                 "minimum_net_move_bps": float(minimum_net_move_bps),
+                "label_noise_version": LABEL_NOISE_VERSION,
+                "label_noise_policy": label_noise_summary["policy"],
                 "models": sorted(candidates),
                 "calibration_methods": list(calibration_methods),
                 "thresholds": [
@@ -783,6 +782,8 @@ class AgentTrainer:
             "validation_rows": len(validation),
             "test_rows": len(test),
             "market_count": len(dataset.markets),
+            "label_noise_version": LABEL_NOISE_VERSION,
+            "label_noise": label_noise_summary,
             "alpha_model": winner_name,
             "alpha_probability_threshold": threshold,
             "alpha_auc": test_auc,
@@ -869,6 +870,8 @@ class AgentTrainer:
             "timeframe": timeframe,
             "horizon_bars": int(horizon_bars),
             "minimum_net_move_bps": float(minimum_net_move_bps),
+            "label_noise_version": LABEL_NOISE_VERSION,
+            "label_noise": label_noise_summary,
             "alpha_probability_threshold": threshold,
             "alpha_calibration_method": winner_calibration_method,
             "global_known_trial_count": trial_ledger["global_known_trial_count"],

@@ -27,6 +27,13 @@ from crypto_ai_swing.agents.feature_denoising import (
     NOISE_CONTROL_VERSION,
     feature_group_counts,
 )
+from crypto_ai_swing.agents.label_noise import (
+    LABEL_NOISE_VERSION,
+    alpha_label_noise_summary,
+    economic_alpha_sample_weight,
+    fit_weighted_or_confident_subset,
+    resolve_label_noise_policy,
+)
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.universe.runtime import UniverseManager
@@ -57,54 +64,30 @@ def _economic_sample_weight(
     frame: pd.DataFrame,
     *,
     cost_floor: float,
+    label_noise_cfg: dict[str, Any] | None = None,
 ) -> np.ndarray:
-    realized = frame["target_forward_return"].to_numpy(float)
-    mae = frame["target_mae"].to_numpy(float)
-    mfe = frame["target_mfe"].to_numpy(float)
-    net = realized - float(cost_floor)
-
-    scale = np.clip(
-        np.abs(net) / max(float(cost_floor), 1e-4),
-        0.0,
-        3.0,
-    )
-    path_quality = np.clip(
-        (mfe - mae) / (mfe + mae + 1e-9),
-        0.0,
-        1.0,
-    )
-
-    return np.clip(
-        1.0
-        + 0.35 * np.sqrt(scale)
-        + 0.25 * path_quality * (net > 0.0),
-        0.75,
-        2.50,
+    return economic_alpha_sample_weight(
+        frame,
+        cost_floor=cost_floor,
+        config=label_noise_cfg,
     )
 
 
-def _fit_weighted(model, x, y, weights):
-    weights = np.asarray(weights, dtype=float)
-
-    if hasattr(model, "steps") and getattr(model, "steps", None):
-        step_name = model.steps[-1][0]
-        try:
-            return model.fit(
-                x,
-                y,
-                **{f"{step_name}__sample_weight": weights},
-            )
-        except (TypeError, ValueError):
-            pass
-
-    try:
-        return model.fit(
-            x,
-            y,
-            sample_weight=weights,
-        )
-    except (TypeError, ValueError):
-        return model.fit(x, y)
+def _fit_weighted(
+    model,
+    x,
+    y,
+    weights,
+    *,
+    fallback_min_weight: float = 0.25,
+):
+    return fit_weighted_or_confident_subset(
+        model,
+        x,
+        y,
+        weights,
+        fallback_min_weight=fallback_min_weight,
+    )
 
 
 def _economic_alpha_score(
@@ -428,6 +411,10 @@ class HPOService:
     def _study(self, head: str, dataset_id: str):
         optuna = self._optuna()
 
+        label_contract = (
+            LABEL_NOISE_VERSION if str(head) == "alpha"
+            else "standard_label_contract"
+        )
         identity = hashlib.sha256(
             (
                 HPO_SEARCH_SPACE_VERSION
@@ -435,6 +422,8 @@ class HPOService:
                 + str(head)
                 + "|"
                 + str(dataset_id)
+                + "|"
+                + label_contract
             ).encode("utf-8")
         ).hexdigest()[:16]
 
@@ -572,7 +561,20 @@ class HPOService:
 
         cost_floor = float(training_cfg.get("minimum_net_move_bps", self.settings.agents.get("minimum_net_move_bps", 65.0))) / 10_000.0
 
-        alpha_train_weights = _economic_sample_weight(train, cost_floor=cost_floor)
+        label_noise_cfg = dict(
+            self.settings.agents.get("label_noise", {}) or {}
+        )
+        label_noise_policy = resolve_label_noise_policy(label_noise_cfg)
+        label_noise_summary = alpha_label_noise_summary(
+            train,
+            cost_floor=cost_floor,
+            config=label_noise_cfg,
+        )
+        alpha_train_weights = _economic_sample_weight(
+            train,
+            cost_floor=cost_floor,
+            label_noise_cfg=label_noise_cfg,
+        )
 
         return_low = float(train["target_forward_return"].quantile(0.005))
 
@@ -598,6 +600,9 @@ class HPOService:
                         x_train,
                         y_train,
                         alpha_train_weights,
+                        fallback_min_weight=(
+                            label_noise_policy.fallback_min_weight
+                        ),
                     )
                 else:
                     model.fit(x_train, y_train)
@@ -679,6 +684,8 @@ class HPOService:
             "horizon_bars": int(horizon_bars),
             "feature_count": len(features),
             "feature_columns": list(features),
+            "label_noise_version": LABEL_NOISE_VERSION,
+            "label_noise": label_noise_summary,
             "heads": heads,
             "backprop_mlp_enabled": allow_mlp,
             "final_test_touched_by_hpo": False,
