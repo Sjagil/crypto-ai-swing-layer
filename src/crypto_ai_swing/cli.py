@@ -1969,4 +1969,3 @@ def learning_worker(
         console.print_json(json.dumps(worker.run_once(), default=str))
         return
     worker.run_forever()
-
