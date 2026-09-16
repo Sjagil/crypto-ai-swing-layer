@@ -154,14 +154,23 @@ def test_round47h1_stale_single_timeframe_hpo_is_rejected(tmp_path):
     assert "TIMEFRAME_MISMATCH" in summary["contract_mismatches"]
 
 
-def test_round47h1_config_is_15m_but_rl_waits_for_h2():
+def test_round47h1_config_is_15m_and_rl_h2_is_active():
     root = Path(__file__).resolve().parents[1]
     text = (root / "config/agents.yaml").read_text()
     assert "timeframe: 15m" in text
     assert "horizon_bars: 16" in text
     assert "multitimeframe:" in text
-    rl_block = text.split("rl:", 1)[1].split("research_agent_panel:", 1)[0]
-    assert "timeframe: 1h" in rl_block
+
+    rl_block = text.split("rl:", 1)[1].split(
+        "research_agent_panel:", 1
+    )[0]
+
+    assert "timeframe: 15m" in rl_block
+    assert "minimum_rows_per_market: 8000" in rl_block
+    assert "minimum_hold_bars: 24" in rl_block
+    assert "cooldown_bars: 8" in rl_block
+    assert "minimum_hold_hours: 6" in rl_block
+    assert "cooldown_hours: 2" in rl_block
 
 def test_round47h1_legacy_factory_without_explicit_contract_remains_compatible(tmp_path):
     root = Path(tmp_path)
@@ -203,4 +212,3 @@ def test_round47h1_legacy_factory_without_explicit_contract_remains_compatible(t
     assert summary["strict_contract_validation"] is False
     assert summary["contract_compatible"] is True
     assert factory.alpha_candidate() is not None
-
