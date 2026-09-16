@@ -1039,6 +1039,9 @@ class ProactiveTrader:
             if causal.empty:
                 skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_SCREEN_CANDLE"})
                 continue
+            causal = causal.copy()
+            causal.attrs["market"] = market
+            causal.attrs["timeframe"] = primary
             causal_primary[market] = causal
             screen_row = screen_frame(causal)
             screen_row["technical"] = technical_snapshot(
