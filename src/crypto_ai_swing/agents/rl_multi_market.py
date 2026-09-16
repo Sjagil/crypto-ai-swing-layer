@@ -14,11 +14,21 @@ from crypto_ai_swing.agents.canonical_features import (
 )
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.agents.hpo import HPOModelFactory
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_multitimeframe_feature_tables,
+    fetch_multitimeframe_frames,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+    timeframe_seconds,
+    validate_selected_mtf_features,
+)
 
 
 CANDIDATE_SEEDS = (17, 29, 43)
 
-RL_STATE_VERSION = "round47c3_position_state_v1"
+RL_STATE_VERSION = "round47h_final_mtf_position_state_v2"
 RL_STATE_FEATURES = (
     "position",
     "hold_progress",
@@ -34,14 +44,41 @@ def _prepare(
     bridge: CryptoLibraryBridge,
     market: str,
     frame: pd.DataFrame,
+    *,
+    feature_frame: pd.DataFrame | None = None,
+    timeframe: str | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    features = canonical_model_frame(
-        bridge,
-        frame,
-        market=market,
-        timeframe=str(frame.attrs.get("timeframe") or "1h"),
-        benchmark=None,
+    selected_timeframe = str(
+        timeframe or frame.attrs.get("timeframe") or "1h"
+    )
+    features = (
+        feature_frame.copy()
+        if feature_frame is not None
+        else canonical_model_frame(
+            bridge,
+            frame,
+            market=market,
+            timeframe=selected_timeframe,
+            benchmark=None,
+        )
     ).replace([np.inf, -np.inf], np.nan)
+
+    operational = [
+        name
+        for name in features.columns
+        if str(name).lower().endswith(
+            ("__age_bars", "__present", "__source_close_ns")
+        )
+    ]
+    if operational:
+        features = features.drop(columns=operational)
+
+    for name in features.columns:
+        if pd.api.types.is_numeric_dtype(features[name]):
+            features[name] = pd.to_numeric(
+                features[name], errors="coerce"
+            ).astype(np.float32, copy=False)
+
     next_return = (
         pd.to_numeric(frame["close"], errors="coerce")
         .pct_change()
@@ -51,7 +88,19 @@ def _prepare(
     joined = features.copy()
     joined["__next_return"] = next_return
     joined = joined.dropna(subset=["__next_return"])
-    return joined.drop(columns=["__next_return"]), joined["__next_return"]
+    return (
+        joined.drop(columns=["__next_return"]).copy(),
+        joined["__next_return"].astype(np.float32, copy=False),
+    )
+
+
+def _environment_kwargs(timeframe: str) -> dict[str, int]:
+    hours_per_bar = timeframe_seconds(str(timeframe)) / 3600.0
+    return {
+        "minimum_hold_bars": max(1, int(round(6.0 / hours_per_bar))),
+        "cooldown_bars": max(0, int(round(2.0 / hours_per_bar))),
+    }
+
 
 def _normalize(
     frame: pd.DataFrame,
@@ -397,11 +446,13 @@ def _evaluate(
     r: pd.Series,
     *,
     stress_bps: float = 0.0,
+    env_kwargs: dict[str, int] | None = None,
 ):
     env = _env(
         x,
         r,
         extra_stress_bps=stress_bps,
+        **dict(env_kwargs or {}),
     )
     obs, _ = env.reset()
     done = False
@@ -583,11 +634,16 @@ def _evaluate(
     }
 
 
-def _metrics(model, split: dict[str, tuple[pd.DataFrame, pd.Series]]):
+def _metrics(
+    model,
+    split: dict[str, tuple[pd.DataFrame, pd.Series]],
+    *,
+    env_kwargs: dict[str, int] | None = None,
+):
     per_market = {}
     series = {}
     for market, (x, r) in sorted(split.items()):
-        result = _evaluate(model, x, r)
+        result = _evaluate(model, x, r, env_kwargs=env_kwargs)
         series[market] = result.pop("step_returns")
         per_market[market] = result
 
@@ -739,24 +795,63 @@ class MultiMarketRLTrainer:
         self,
         *,
         markets: list[str],
-        timeframe: str = "1h",
+        timeframe: str = "15m",
         total_timesteps: int = 50_000,
-        minimum_rows_per_market: int = 900,
+        minimum_rows_per_market: int = 8_000,
     ) -> dict[str, Any]:
         from stable_baselines3 import PPO
         from stable_baselines3.common.vec_env import DummyVecEnv
 
-        frames = self.crypto.ohlcv_many(
-            markets,
-            timeframe,
-            persist=False,
-            concurrency=4,
+        mtf_policy = resolve_mtf_policy(
+            dict(
+                (getattr(self.settings, "agents", {}) or {}).get(
+                    "multitimeframe", {}
+                )
+                or {}
+            )
         )
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        feature_tables = {}
+        mtf_audit = {"enabled": False}
+
+        if mtf_enabled:
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                markets,
+                policy=mtf_policy,
+                concurrency=4,
+            )
+            frames, feature_tables, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+        else:
+            frames = self.crypto.ohlcv_many(
+                markets,
+                timeframe,
+                persist=False,
+                concurrency=4,
+            )
+
         raw = {}
         for market, frame in frames.items():
             if frame is None or frame.empty:
                 continue
-            x, r = _prepare(self.crypto, market, frame)
+            x, r = _prepare(
+                self.crypto,
+                market,
+                frame,
+                feature_frame=feature_tables.get(market),
+                timeframe=timeframe,
+            )
             if len(x) >= minimum_rows_per_market:
                 raw[market] = (x, r)
 
@@ -772,14 +867,17 @@ class MultiMarketRLTrainer:
             validation_end = int(n * 0.80)
             if train_end < 400 or validation_end - train_end < 150 or n - validation_end < 150:
                 continue
-            train_raw[market] = (x.iloc[:train_end].copy(), r.iloc[:train_end].copy())
+            train_raw[market] = (
+                x.iloc[: max(1, train_end - 1)].copy(),
+                r.iloc[: max(1, train_end - 1)].copy(),
+            )
             validation_raw[market] = (
-                x.iloc[train_end:validation_end].copy(),
-                r.iloc[train_end:validation_end].copy(),
+                x.iloc[train_end + 1 : max(train_end + 2, validation_end - 1)].copy(),
+                r.iloc[train_end + 1 : max(train_end + 2, validation_end - 1)].copy(),
             )
             test_raw[market] = (
-                x.iloc[validation_end:].copy(),
-                r.iloc[validation_end:].copy(),
+                x.iloc[validation_end + 1 :].copy(),
+                r.iloc[validation_end + 1 :].copy(),
             )
 
         if len(train_raw) < 6:
@@ -808,8 +906,20 @@ class MultiMarketRLTrainer:
             train_matrix_full,
             tuple(train_matrix_full.columns),
             target=train_target_full,
-            maximum_features=64,
+            maximum_features=int(
+                (self.settings.agents.get("hpo", {}) or {}).get(
+                    "rl_maximum_features", 80
+                )
+            ),
         )
+        if mtf_enabled:
+            mtf_selected_groups = validate_selected_mtf_features(
+                selected_features,
+                policy=mtf_policy,
+            )
+        else:
+            mtf_selected_groups = {}
+
         if len(selected_features) < 8:
             raise ValueError(
                 f"RL canonical train-only feature selection left {len(selected_features)} features"
@@ -838,6 +948,8 @@ class MultiMarketRLTrainer:
         validation = norm_split(validation_raw)
         test = norm_split(test_raw)
 
+        env_kwargs = _environment_kwargs(timeframe)
+
         per_candidate_timesteps = max(
             10_000,
             int(total_timesteps) // len(CANDIDATE_SEEDS),
@@ -846,7 +958,11 @@ class MultiMarketRLTrainer:
             self.settings,
             timeframe=timeframe,
             horizon_bars=1,
-        ).rl_params()
+        ).rl_params(
+            timeframe=timeframe,
+            mtf_version=(MTF_FUSION_VERSION if mtf_enabled else None),
+            feature_columns=selected_features,
+        )
         candidate_rows = []
         candidate_models = {}
         for seed in CANDIDATE_SEEDS:
@@ -854,7 +970,9 @@ class MultiMarketRLTrainer:
             for market in sorted(train):
                 x, r = train[market]
                 factories.append(
-                    lambda x=x.copy(), r=r.copy(): _env(x, r)
+                    lambda x=x.copy(), r=r.copy(): _env(
+                        x, r, **env_kwargs
+                    )
                 )
             vector_env = DummyVecEnv(factories)
             architecture = {
@@ -880,7 +998,7 @@ class MultiMarketRLTrainer:
                 verbose=0,
             )
             model.learn(total_timesteps=per_candidate_timesteps)
-            metrics = _metrics(model, validation)
+            metrics = _metrics(model, validation, env_kwargs=env_kwargs)
             portfolio = metrics.pop("portfolio_step_returns")
             objective = (
                 metrics["mean_return"]
@@ -964,14 +1082,16 @@ class MultiMarketRLTrainer:
         selected_seed = int(selected["seed"])
         model = candidate_models[selected_seed]
 
-        test_metrics = _metrics(model, test)
+        test_metrics = _metrics(model, test, env_kwargs=env_kwargs)
         normal_portfolio = test_metrics.pop("portfolio_step_returns")
 
         # Stress the selected final-test policy with an extra 25 bps per
         # turnover event, without re-selecting the model.
         stressed_series = {}
         for market, (x, r) in test.items():
-            stressed = _evaluate(model, x, r, stress_bps=25.0)
+            stressed = _evaluate(
+                model, x, r, stress_bps=25.0, env_kwargs=env_kwargs
+            )
             stressed_series[market] = stressed.pop("step_returns")
         stressed_portfolio = (
             pd.concat(stressed_series, axis=1).mean(axis=1).dropna()
@@ -1027,7 +1147,19 @@ class MultiMarketRLTrainer:
             "candidate_validation": candidate_rows,
             "selected_seed": selected_seed,
             "feature_columns": list(selected_features),
-            "feature_source": "canonical_feature_pipeline_v1",
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled
+                else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe_selected_groups": mtf_selected_groups,
+            "multitimeframe_audit": mtf_audit,
+            "environment_timing": env_kwargs,
             "observation_state_version": RL_STATE_VERSION,
             "observation_state_features": list(RL_STATE_FEATURES),
             "runtime_state_mode": "FLAT_ENTRY_ADVISORY_ONLY",

@@ -35,6 +35,19 @@ def _future_extreme(series: pd.Series, horizon: int, mode: str) -> pd.Series:
     return table.min(axis=1, skipna=False) if mode == "min" else table.max(axis=1, skipna=False)
 
 
+def _deterministic_candidate_sample(
+    frame: pd.DataFrame,
+    *,
+    maximum_rows: int,
+) -> pd.DataFrame:
+    if len(frame) <= int(maximum_rows):
+        return frame
+    positions = np.linspace(
+        0, len(frame) - 1, int(maximum_rows), dtype=int
+    )
+    return frame.iloc[positions]
+
+
 def build_agent_dataset(
     frames: dict[str, pd.DataFrame],
     *,
@@ -42,6 +55,9 @@ def build_agent_dataset(
     minimum_net_move_bps: float = 65.0,
     feature_columns: Iterable[str] | None = DEFAULT_FEATURES,
     canonical_bridge=None,
+    feature_tables_override: dict[str, pd.DataFrame] | None = None,
+    maximum_candidates: int = 180,
+    consume_feature_tables_override: bool = False,
 ) -> AgentDataset:
     horizon = int(horizon_bars)
     if horizon <= 0:
@@ -54,7 +70,10 @@ def build_agent_dataset(
             continue
         ohlcv = canonicalize_ohlcv(raw)
         ohlcv_tables[market] = ohlcv
-        if canonical_bridge is None:
+        override = (feature_tables_override or {}).get(str(market).upper())
+        if override is not None:
+            feature_tables[market] = override.reindex(ohlcv.index).copy()
+        elif canonical_bridge is None:
             feature_tables[market] = build_features(ohlcv)
         else:
             from crypto_ai_swing.agents.canonical_features import canonical_model_frame
@@ -73,12 +92,31 @@ def build_agent_dataset(
     if feature_columns is None:
         from crypto_ai_swing.agents.canonical_features import candidate_columns
 
-        union = pd.concat(feature_tables.values(), axis=0, sort=False)
+        market_count = max(1, len(feature_tables))
+        per_market_rows = max(
+            2_000,
+            min(8_000, 120_000 // market_count),
+        )
+        samples = [
+            _deterministic_candidate_sample(
+                table,
+                maximum_rows=per_market_rows,
+            )
+            for _, table in sorted(feature_tables.items())
+        ]
+        union = pd.concat(
+            samples,
+            axis=0,
+            sort=False,
+            copy=False,
+        )
         features = candidate_columns(
             union,
             minimum_coverage=0.55,
-            maximum_candidates=180,
+            maximum_candidates=int(maximum_candidates),
         )
+        del union
+        del samples
     else:
         features = tuple(str(x) for x in feature_columns)
     if not features:
@@ -92,6 +130,11 @@ def build_agent_dataset(
             if missing:
                 raise ValueError(f"missing features: {missing}")
         selected = feat.reindex(columns=list(features)).copy()
+        for feature_name in features:
+            if feature_name in selected.columns:
+                selected[feature_name] = pd.to_numeric(
+                    selected[feature_name], errors="coerce"
+                ).astype(np.float32, copy=False)
         future_close = ohlcv["close"].shift(-horizon)
         future_low = _future_extreme(ohlcv["low"], horizon, "min")
         future_high = _future_extreme(ohlcv["high"], horizon, "max")
@@ -133,7 +176,7 @@ def build_agent_dataset(
         chunks.append(item)
     if not chunks:
         raise ValueError("no causal training rows")
-    frame = pd.concat(chunks).sort_values(["feature_time", "market"])
+    frame = pd.concat(chunks, copy=False).sort_values(["feature_time", "market"])
     if frame.empty:
         raise ValueError("dataset empty after causal filtering")
     feature_time = pd.to_datetime(frame["feature_time"], utc=True)

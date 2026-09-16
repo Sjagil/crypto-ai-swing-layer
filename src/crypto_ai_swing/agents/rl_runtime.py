@@ -13,6 +13,13 @@ from crypto_ai_swing.agents.rl_multi_market import (
 
 from crypto_ai_swing.agents.dataset import DEFAULT_FEATURES
 from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_runtime_mtf_feature_frame,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.data.features import build_features as legacy_build_features
 
@@ -76,6 +83,7 @@ def _runtime_live_influence_allowed(
 class RLRuntime:
     def __init__(self, settings, *, mode: str = "shadow") -> None:
         self.mode = str(mode).lower()
+        self.settings = settings
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         self.root = settings.project_root / "output/crypto_ai_swing/agents/rl"
         self.candidate_pointer = self.root / "latest.pointer.json"
@@ -185,7 +193,72 @@ class RLRuntime:
         features = tuple(
             self._manifest.get("feature_columns") or DEFAULT_FEATURES
         )
-        if self._manifest.get("feature_source") == "canonical_feature_pipeline_v1":
+        feature_source = str(
+            self._manifest.get("feature_source") or ""
+        )
+
+        if feature_source == MTF_FEATURE_SOURCE:
+            policy = resolve_mtf_policy(
+                dict(
+                    self.settings.agents.get(
+                        "multitimeframe",
+                        {},
+                    )
+                    or {}
+                )
+            )
+            manifest_version = str(
+                self._manifest.get("multitimeframe_version") or ""
+            )
+            manifest_hash = str(
+                self._manifest.get(
+                    "multitimeframe_contract_hash"
+                )
+                or ""
+            )
+            expected_hash = mtf_contract_hash(policy)
+
+            if manifest_version != MTF_FUSION_VERSION:
+                return {
+                    **self.status(),
+                    "score": None,
+                    "long_probability": None,
+                    "reason": "RL_MTF_VERSION_MISMATCH",
+                }
+
+            if manifest_hash != expected_hash:
+                return {
+                    **self.status(),
+                    "score": None,
+                    "long_probability": None,
+                    "reason": "RL_MTF_CONTRACT_MISMATCH",
+                }
+
+            try:
+                table, mtf_audit = build_runtime_mtf_feature_frame(
+                    self.crypto,
+                    market=str(
+                        frame.attrs.get("market")
+                        or "UNKNOWN"
+                    ).upper(),
+                    policy=policy,
+                    concurrency=1,
+                )
+            except Exception as exc:
+                return {
+                    **self.status(),
+                    "score": None,
+                    "long_probability": None,
+                    "reason": "RL_MTF_CONTEXT_NOT_READY",
+                    "error": (
+                        f"{type(exc).__name__}:"
+                        f"{str(exc)[:300]}"
+                    ),
+                }
+
+            self._manifest["runtime_mtf_audit"] = mtf_audit
+
+        elif feature_source == "canonical_feature_pipeline_v1":
             table = canonical_model_frame(
                 self.crypto,
                 frame,

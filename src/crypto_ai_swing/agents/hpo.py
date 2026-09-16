@@ -34,12 +34,22 @@ from crypto_ai_swing.agents.label_noise import (
     fit_weighted_or_confident_subset,
     resolve_label_noise_policy,
 )
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_multitimeframe_feature_tables,
+    fetch_multitimeframe_frames,
+    horizon_bars_for_hours,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+    validate_selected_mtf_features,
+)
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.universe.runtime import UniverseManager
 
 SCHEMA = "crypto_ai_swing_hpo_v1"
-HPO_SEARCH_SPACE_VERSION = "round47a2_v1"
+HPO_SEARCH_SPACE_VERSION = "round47h1_mtf_v1"
 
 
 def _now() -> datetime:
@@ -532,23 +542,87 @@ class HPOService:
             },
         }
 
-    def run_supervised(self, *, markets=None, timeframe="1h", horizon_bars=4, minimum_rows=8000) -> HPORunResult:
+    def run_supervised(self, *, markets=None, timeframe="15m", horizon_bars=16, minimum_rows=8000) -> HPORunResult:
         selected = [str(v).upper() for v in (markets or []) if str(v).strip()] or list(self.universe.current().get("markets", []))
-        frames = self.crypto.ohlcv_many(selected, timeframe, persist=False, concurrency=int(self.cfg.get("fetch_concurrency", 4)))
-        frames = {m: f for m, f in frames.items() if f is not None and not f.empty}
+        mtf_cfg = dict(self.settings.agents.get("multitimeframe", {}) or {})
+        mtf_policy = resolve_mtf_policy(mtf_cfg)
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        mtf_audit = {"enabled": False, "version": None, "contract_hash": None}
+        feature_tables_override = None
+        maximum_candidates = 180
+
+        if mtf_enabled:
+            horizon_bars = horizon_bars_for_hours(
+                mtf_policy.base_timeframe,
+                mtf_policy.primary_horizon_hours,
+            )
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                selected,
+                policy=mtf_policy,
+                concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+            )
+            frames, feature_tables_override, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+            maximum_candidates = mtf_policy.candidate_maximum_features
+        else:
+            frames = self.crypto.ohlcv_many(
+                selected,
+                timeframe,
+                persist=False,
+                concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+            )
+            frames = {
+                m: f for m, f in frames.items() if f is not None and not f.empty
+            }
+
         dataset = build_agent_dataset(
             frames,
             horizon_bars=int(horizon_bars),
             minimum_net_move_bps=float(self.settings.agents.get("minimum_net_move_bps", 65.0)),
             feature_columns=None,
             canonical_bridge=self.crypto,
+            feature_tables_override=feature_tables_override,
+            maximum_candidates=maximum_candidates,
+            consume_feature_tables_override=mtf_enabled,
         )
         if len(dataset.frame) < int(minimum_rows):
             raise ValueError(f"HPO insufficient causal rows: {len(dataset.frame)} < {minimum_rows}")
         train, validation, _ = purged_chronological_split(dataset)
-        features = select_train_only_features(
-            train, dataset.feature_columns, target=train["target_forward_return"], maximum_features=int(self.cfg.get("maximum_features", 96))
+        maximum_selected_features = (
+            mtf_policy.supervised_maximum_features
+            if mtf_enabled
+            else int(self.cfg.get("maximum_features", 96))
         )
+        features = select_train_only_features(
+            train,
+            dataset.feature_columns,
+            target=train["target_forward_return"],
+            maximum_features=maximum_selected_features,
+        )
+        mtf_selected_groups = (
+            validate_selected_mtf_features(features, policy=mtf_policy)
+            if mtf_enabled
+            else {}
+        )
+        if mtf_enabled:
+            mtf_selected_groups = validate_selected_mtf_features(
+                features,
+                policy=mtf_policy,
+            )
+        else:
+            mtf_selected_groups = {}
+
         if len(features) < 8:
             raise ValueError(f"HPO selected only {len(features)} features")
         x_train, x_val = train.loc[:, features], validation.loc[:, features]
@@ -684,6 +758,17 @@ class HPOService:
             "horizon_bars": int(horizon_bars),
             "feature_count": len(features),
             "feature_columns": list(features),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe": mtf_audit,
+            "multitimeframe_selected_groups": mtf_selected_groups,
             "label_noise_version": LABEL_NOISE_VERSION,
             "label_noise": label_noise_summary,
             "heads": heads,
@@ -694,7 +779,7 @@ class HPOService:
         self._atomic(payload)
         return HPORunResult("READY", self.state_path, dataset.dataset_id, payload)
 
-    def run_rl(self, *, markets=None, timeframe="1h", minimum_rows_per_market=900) -> HPORunResult:
+    def run_rl(self, *, markets=None, timeframe="15m", minimum_rows_per_market=8000) -> HPORunResult:
         try:
             from stable_baselines3 import PPO
             from stable_baselines3.common.vec_env import DummyVecEnv
@@ -709,12 +794,51 @@ class HPOService:
             raise RuntimeError("RL HPO requires .[ai,research] extras") from exc
 
         selected = [str(v).upper() for v in (markets or []) if str(v).strip()] or list(self.universe.current().get("markets", []))
-        frames = self.crypto.ohlcv_many(selected, timeframe, persist=False, concurrency=int(self.cfg.get("fetch_concurrency", 4)))
+        mtf_policy = resolve_mtf_policy(
+            dict(self.settings.agents.get("multitimeframe", {}) or {})
+        )
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        feature_tables = {}
+        mtf_audit = {"enabled": False}
+
+        if mtf_enabled:
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                selected,
+                policy=mtf_policy,
+                concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+            )
+            frames, feature_tables, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+        else:
+            frames = self.crypto.ohlcv_many(
+                selected,
+                timeframe,
+                persist=False,
+                concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+            )
+
         raw = {}
         for market, frame in frames.items():
             if frame is None or frame.empty:
                 continue
-            x, r = _prepare(self.crypto, market, frame)
+            x, r = _prepare(
+                self.crypto,
+                market,
+                frame,
+                feature_frame=feature_tables.get(market),
+                timeframe=timeframe,
+            )
             if len(x) >= int(minimum_rows_per_market):
                 raw[market] = (x, r)
         if len(raw) < 6:
@@ -759,7 +883,7 @@ class HPOService:
             maximum_features=int(
                 self.cfg.get(
                     "rl_maximum_features",
-                    64,
+                    80,
                 )
             ),
         )
@@ -804,6 +928,8 @@ class HPOService:
             ).encode()
         ).hexdigest()
         study = self._study("rl_ppo", dataset_id)
+        from crypto_ai_swing.agents.rl_multi_market import _environment_kwargs
+        env_kwargs = _environment_kwargs(timeframe)
         trial_timesteps = int(self.cfg.get("rl_trial_timesteps", 15000))
 
         def objective(trial):
@@ -821,7 +947,10 @@ class HPOService:
                 "n_steps": trial.suggest_categorical("n_steps", [256, 512, 1024]),
                 "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
             }
-            factories = [(lambda x=x.copy(), r=r.copy(): _env(x, r)) for x, r in (train[m] for m in sorted(train))]
+            factories = [
+                (lambda x=x.copy(), r=r.copy(): _env(x, r, **env_kwargs))
+                for x, r in (train[m] for m in sorted(train))
+            ]
             architecture = {
                 "64x64": [64, 64],
                 "128x64": [128, 64],
@@ -845,7 +974,7 @@ class HPOService:
                 verbose=0,
             )
             model.learn(total_timesteps=trial_timesteps)
-            metrics = _metrics(model, validation)
+            metrics = _metrics(model, validation, env_kwargs=env_kwargs)
             metrics.pop("portfolio_step_returns", None)
             return float(
                 metrics["mean_return"]
@@ -882,6 +1011,14 @@ class HPOService:
                 "feature_group_counts": feature_group_counts(features),
                 "noise_control_version": NOISE_CONTROL_VERSION,
                 "feature_selection_target": "TRAIN_NEXT_RETURN_ONLY",
+                "multitimeframe_version": (
+                    MTF_FUSION_VERSION if mtf_enabled else None
+                ),
+                "multitimeframe_contract_hash": (
+                    mtf_contract_hash(mtf_policy) if mtf_enabled else None
+                ),
+                "multitimeframe_selected_groups": mtf_selected_groups,
+                "environment_timing": env_kwargs,
                 "params": dict(study.best_trial.params),
                 "objective": float(study.best_value),
                 "trial_number": int(study.best_trial.number),
@@ -900,11 +1037,47 @@ class HPOService:
 
 
 class HPOModelFactory:
-    def __init__(self, settings, *, timeframe="1h", horizon_bars=4):
+    def __init__(
+        self,
+        settings,
+        *,
+        timeframe="1h",
+        horizon_bars=4,
+        dataset_id=None,
+        feature_columns=None,
+        mtf_version=None,
+        label_noise_version=None,
+    ):
         self.settings = settings
         self.path = settings.project_root / "output/crypto_ai_swing/hpo/best.json"
         self.state = self._load()
-        max_age = float((settings.agents.get("hpo", {}) or {}).get("maximum_state_age_hours", 168))
+        self.expected_dataset_id = dataset_id
+        self.expected_timeframe = str(timeframe)
+        self.expected_horizon_bars = int(horizon_bars)
+        self.expected_feature_columns = (
+            tuple(str(v) for v in feature_columns)
+            if feature_columns is not None
+            else None
+        )
+        self.expected_mtf_version = mtf_version
+        self.expected_label_noise_version = label_noise_version
+        self.strict_contract_validation = any(
+            value is not None
+            for value in (
+                dataset_id,
+                feature_columns,
+                mtf_version,
+                label_noise_version,
+            )
+        )
+        self.contract_mismatches: list[str] = []
+        self.dataset_id_match: bool | None = None
+
+        max_age = float(
+            (settings.agents.get("hpo", {}) or {}).get(
+                "maximum_state_age_hours", 168
+            )
+        )
         raw = self.state.get("generated_at")
         if raw:
             try:
@@ -912,9 +1085,12 @@ class HPOModelFactory:
                 if stamp.tzinfo is None:
                     stamp = stamp.replace(tzinfo=UTC)
                 if _now() - stamp.astimezone(UTC) > timedelta(hours=max_age):
+                    self.contract_mismatches.append("STATE_EXPIRED")
                     self.state = {}
             except Exception:
+                self.contract_mismatches.append("STATE_TIMESTAMP_INVALID")
                 self.state = {}
+        self._validate_contract()
 
     def _load(self):
         try:
@@ -923,35 +1099,131 @@ class HPOModelFactory:
         except Exception:
             return {}
 
+    def _validate_contract(self) -> None:
+        if not self.state:
+            if self.strict_contract_validation and not self.contract_mismatches:
+                self.contract_mismatches.append("STATE_MISSING")
+            return
+
+        if not self.strict_contract_validation:
+            return
+
+        if str(self.state.get("timeframe")) != self.expected_timeframe:
+            self.contract_mismatches.append("TIMEFRAME_MISMATCH")
+
+        try:
+            saved_horizon = int(self.state.get("horizon_bars"))
+        except Exception:
+            saved_horizon = -1
+        if saved_horizon != self.expected_horizon_bars:
+            self.contract_mismatches.append("HORIZON_MISMATCH")
+
+        if self.expected_feature_columns is not None:
+            saved = tuple(
+                str(v)
+                for v in (self.state.get("feature_columns") or ())
+            )
+            if saved != self.expected_feature_columns:
+                self.contract_mismatches.append("FEATURE_CONTRACT_MISMATCH")
+
+        if self.expected_mtf_version is not None:
+            if str(self.state.get("multitimeframe_version")) != str(
+                self.expected_mtf_version
+            ):
+                self.contract_mismatches.append("MTF_VERSION_MISMATCH")
+
+        if self.expected_label_noise_version is not None:
+            if str(self.state.get("label_noise_version")) != str(
+                self.expected_label_noise_version
+            ):
+                self.contract_mismatches.append("LABEL_NOISE_VERSION_MISMATCH")
+
+        if self.expected_dataset_id is not None:
+            self.dataset_id_match = bool(
+                str(self.state.get("dataset_id"))
+                == str(self.expected_dataset_id)
+            )
+
+    @property
+    def contract_compatible(self) -> bool:
+        if not self.state:
+            return False
+        if not self.strict_contract_validation:
+            return True
+        return not bool(self.contract_mismatches)
+
     def summary(self):
         return {
             "enabled": bool(self.state),
             "state_path": str(self.path),
             "dataset_id": self.state.get("dataset_id"),
+            "expected_dataset_id": self.expected_dataset_id,
+            "dataset_id_match": self.dataset_id_match,
             "generated_at": self.state.get("generated_at"),
             "backprop_mlp_enabled": self.state.get("backprop_mlp_enabled"),
+            "contract_compatible": self.contract_compatible,
+            "strict_contract_validation": self.strict_contract_validation,
+            "contract_status": (
+                "MATCHED"
+                if self.contract_compatible and self.dataset_id_match is not False
+                else (
+                    "MATCHED_WITH_DATA_REFRESH"
+                    if self.contract_compatible
+                    else "STALE_HYPERPARAMS"
+                )
+            ),
+            "contract_mismatches": list(self.contract_mismatches),
             "heads": {
-                k: {"family": (v or {}).get("family"), "objective": (v or {}).get("objective")}
+                k: {
+                    "family": (v or {}).get("family"),
+                    "objective": (v or {}).get("objective"),
+                }
                 for k, v in dict(self.state.get("heads") or {}).items()
             },
             "rl": {"objective": dict(self.state.get("rl") or {}).get("objective")},
         }
 
+    def _head(self, name):
+        if not self.contract_compatible:
+            return None
+        return dict(self.state.get("heads") or {}).get(name)
+
     def alpha_candidate(self):
-        spec = dict(self.state.get("heads") or {}).get("alpha")
+        spec = self._head("alpha")
         return _classifier(spec) if spec else None
 
     def regime_model(self):
-        spec = dict(self.state.get("heads") or {}).get("regime")
+        spec = self._head("regime")
         return _classifier(spec) if spec else None
 
     def return_model(self):
-        spec = dict(self.state.get("heads") or {}).get("return")
+        spec = self._head("return")
         return _regressor(spec) if spec else None
 
     def risk_model(self, *, quantile=0.75):
-        spec = dict(self.state.get("heads") or {}).get("risk")
+        spec = self._head("risk")
         return _regressor(spec, quantile=quantile) if spec else None
 
-    def rl_params(self):
-        return dict(dict(self.state.get("rl") or {}).get("params") or {})
+    def rl_params(
+        self,
+        *,
+        timeframe=None,
+        mtf_version=None,
+        feature_columns=None,
+    ):
+        row = dict(self.state.get("rl") or {})
+        if not row:
+            return {}
+        if timeframe is not None and str(row.get("timeframe")) != str(timeframe):
+            return {}
+        if (
+            mtf_version is not None
+            and str(row.get("multitimeframe_version")) != str(mtf_version)
+        ):
+            return {}
+        if feature_columns is not None:
+            saved = tuple(str(v) for v in (row.get("feature_columns") or ()))
+            expected = tuple(str(v) for v in feature_columns)
+            if saved != expected:
+                return {}
+        return dict(row.get("params") or {})

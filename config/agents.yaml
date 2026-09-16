@@ -2,8 +2,8 @@ schema: crypto_ai_swing_agents_v4
 enabled: true
 training_markets: []
 training_market_source: runtime_universe_25
-timeframe: 1h
-horizon_bars: 4
+timeframe: 15m
+horizon_bars: 16
 minimum_rows: 8000
 minimum_net_move_bps: 65.0
 artifact_status_after_training: SHADOW
@@ -31,6 +31,29 @@ qualification:
   stochastic_simulations: 10000
   historical_trial_floor: 33
   require_point_in_time_universe_for_alpha: true
+multitimeframe:
+  enabled: true
+  version: round47h1_canonical_mtf_v1
+  base_timeframe: 15m
+  required_context_timeframes:
+  - 1h
+  - 2h
+  - 4h
+  - 1d
+  optional_context_timeframes:
+  - 1w
+  minimum_base_rows_per_market: 8000
+  minimum_training_markets: 12
+  maximum_context_features_per_timeframe: 36
+  candidate_maximum_features: 256
+  supervised_maximum_features: 128
+  primary_horizon_hours: 4.0
+  maximum_required_context_age_bars: 1.25
+  minimum_selected_per_required_timeframe: 3
+  minimum_selected_cross_timeframe: 4
+  alignment: CLOSED_CANDLE_BACKWARD_ASOF
+  tactical_catalogue_integration: true
+  fail_closed_runtime_context: true
 label_noise:
   enabled: true
   boundary_band_fraction_of_cost: 0.25
@@ -52,9 +75,9 @@ rl:
   leverage: false
   shorting: false
   live_decision_influence: true
-  timeframe: 1h
+  timeframe: 15m
   total_timesteps: 120000
-  minimum_rows_per_market: 900
+  minimum_rows_per_market: 8000
   retrain_seconds: 86400
   spot_only: true
   shadow_signal_influence: true
@@ -65,8 +88,10 @@ rl:
   - 43
   validation_fraction: 0.2
   final_test_fraction: 0.2
-  minimum_hold_bars: 6
-  cooldown_bars: 2
+  minimum_hold_bars: 24
+  cooldown_bars: 8
+  minimum_hold_hours: 6
+  cooldown_hours: 2
   reward_version: swing_cost_aware_incremental_drawdown_v1
 research_agent_panel:
   enabled: true
@@ -134,8 +159,8 @@ hpo:
   backprop_mlp_enabled: true
   seed: 43
   fetch_concurrency: 4
-  maximum_features: 96
-  rl_maximum_features: 64
+  maximum_features: 128
+  rl_maximum_features: 80
   timeout_seconds_per_head: 1200
   rl_timeout_seconds: 5400
   rl_trial_timesteps: 25000
@@ -146,6 +171,12 @@ hpo:
     regime: 16
     return: 20
     risk: 12
+correlation:
+  window: 90
+  minimum_samples: 30
+  cluster_threshold: 0.75
+  maximum_correlated_exposure_fraction: 0.35
+  large_position_threshold: 0.10
 live_promotion:
   enabled: true
   supervised_enabled: true

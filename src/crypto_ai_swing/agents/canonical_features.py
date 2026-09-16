@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -93,38 +93,36 @@ PREFERRED_TOKENS = (
 PREFERRED_TOKENS = tuple(dict.fromkeys((*PREFERRED_TOKENS, "crypto_vwap_", "crypto_idx_", "crypto_strategy_", "strategy_family_")))
 
 
-PREFERRED_TOKENS = tuple(dict.fromkeys((*PREFERRED_TOKENS, "pattern_", "motif_", "sequence_", "strategy_")))
+PREFERRED_TOKENS = tuple(dict.fromkeys((*PREFERRED_TOKENS, "pattern_", "motif_", "sequence_", "strategy_", "crypto_tactical_", "mtf_")))
+
+MTF_OPERATIONAL_SUFFIXES = ("__age_bars", "__present", "__source_close_ns")
+
+def _is_operational_model_metadata(name: str) -> bool:
+    return str(name).lower().endswith(MTF_OPERATIONAL_SUFFIXES)
+
+def _model_candidate_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.reindex(columns=[
+        name for name in frame.columns
+        if not _is_operational_model_metadata(str(name))
+    ])
 
 
 def _numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns: dict[str, pd.Series] = {}
-
     for name in frame.columns:
         lower = str(name).lower()
         if any(token in lower for token in EXCLUDED_TOKENS):
             continue
-
         series = frame[name]
-
         if pd.api.types.is_bool_dtype(series):
-            columns[str(name)] = series.astype(float)
-            continue
-
-        if pd.api.types.is_numeric_dtype(series):
+            columns[str(name)] = series.astype(np.float32)
+        elif pd.api.types.is_numeric_dtype(series):
             columns[str(name)] = pd.to_numeric(
-                series,
-                errors="coerce",
-            )
-
-    out = pd.DataFrame(
-        columns,
-        index=frame.index,
-    )
-
-    return out.replace(
-        [np.inf, -np.inf],
-        np.nan,
-    )
+                series, errors="coerce"
+            ).astype(np.float32, copy=False)
+    return pd.DataFrame(columns, index=frame.index).replace(
+        [np.inf, -np.inf], np.nan
+    ).copy()
 
 
 def canonical_model_frame(
@@ -134,6 +132,7 @@ def canonical_model_frame(
     market: str,
     timeframe: str | None = None,
     benchmark: pd.DataFrame | None = None,
+    higher_timeframes: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Build causal canonical technical features for supervised/RL models.
 
@@ -175,6 +174,7 @@ def canonical_model_frame(
         selected,
         market=str(market).upper(),
         benchmark=benchmark_selected,
+        higher_timeframes=dict(higher_timeframes or {}),
     )
     features = augment_canonical_model_features(
         bridge,
@@ -206,7 +206,7 @@ def candidate_columns(
     maximum_candidates: int = 180,
 ) -> tuple[str, ...]:
     return denoised_candidate_columns(
-        frame,
+        _model_candidate_frame(frame),
         minimum_coverage=minimum_coverage,
         maximum_candidates=maximum_candidates,
     )
@@ -221,9 +221,13 @@ def select_train_only_features(
     minimum_coverage: float = 0.70,
     maximum_abs_correlation: float = 0.95,
 ) -> tuple[str, ...]:
+    candidate_names = tuple(
+        name for name in candidates
+        if not _is_operational_model_metadata(str(name))
+    )
     return select_stable_train_features(
         train,
-        candidates,
+        candidate_names,
         target=target,
         maximum_features=maximum_features,
         minimum_coverage=minimum_coverage,

@@ -43,6 +43,16 @@ from crypto_ai_swing.agents.label_noise import (
     fit_weighted_or_confident_subset,
     resolve_label_noise_policy,
 )
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_multitimeframe_feature_tables,
+    fetch_multitimeframe_frames,
+    horizon_bars_for_hours,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+    validate_selected_mtf_features,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
     native_model_selection_evidence,
@@ -340,42 +350,89 @@ class AgentTrainer:
         self,
         *,
         markets: list[str] | None = None,
-        timeframe: str = "1h",
-        horizon_bars: int = 4,
+        timeframe: str = "15m",
+        horizon_bars: int = 16,
         minimum_rows: int = 1200,
         minimum_net_move_bps: float = 65.0,
     ) -> TrainingResult:
         selected_markets = [str(x).upper() for x in (markets or []) if str(x).strip()]
         if not selected_markets:
             selected_markets = list(self.universe.current()["markets"])
-        frames = self.crypto.ohlcv_many(
-            selected_markets,
-            timeframe,
-            persist=False,
-            concurrency=4,
+        mtf_cfg = dict(
+            (getattr(self.settings, "agents", {}) or {}).get("multitimeframe", {})
+            or {}
         )
-        frames = {
-            market: frame
-            for market, frame in frames.items()
-            if frame is not None and not frame.empty
-        }
+        mtf_policy = resolve_mtf_policy(mtf_cfg)
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        mtf_audit = {"enabled": False, "version": None, "contract_hash": None}
+        feature_tables_override = None
+        maximum_candidates = 180
+
+        if mtf_enabled:
+            horizon_bars = horizon_bars_for_hours(
+                mtf_policy.base_timeframe,
+                mtf_policy.primary_horizon_hours,
+            )
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                selected_markets,
+                policy=mtf_policy,
+                concurrency=4,
+            )
+            frames, feature_tables_override, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+            maximum_candidates = mtf_policy.candidate_maximum_features
+        else:
+            frames = self.crypto.ohlcv_many(
+                selected_markets,
+                timeframe,
+                persist=False,
+                concurrency=4,
+            )
+            frames = {
+                market: frame
+                for market, frame in frames.items()
+                if frame is not None and not frame.empty
+            }
+
         dataset = build_agent_dataset(
             frames,
             horizon_bars=horizon_bars,
             minimum_net_move_bps=minimum_net_move_bps,
             feature_columns=None,
             canonical_bridge=self.crypto,
+            feature_tables_override=feature_tables_override,
+            maximum_candidates=maximum_candidates,
+            consume_feature_tables_override=mtf_enabled,
         )
         if len(dataset.frame) < int(minimum_rows):
             raise ValueError(
                 f"insufficient causal rows: {len(dataset.frame)} < {minimum_rows}"
             )
         train, validation, test = purged_chronological_split(dataset)
+        maximum_selected_features = (
+            mtf_policy.supervised_maximum_features if mtf_enabled else 96
+        )
         features = select_train_only_features(
             train,
             dataset.feature_columns,
             target=train["target_forward_return"],
-            maximum_features=96,
+            maximum_features=maximum_selected_features,
+        )
+        mtf_selected_groups = (
+            validate_selected_mtf_features(features, policy=mtf_policy)
+            if mtf_enabled
+            else {}
         )
         if len(features) < 8:
             raise ValueError(
@@ -451,6 +508,10 @@ class AgentTrainer:
             self.settings,
             timeframe=timeframe,
             horizon_bars=horizon_bars,
+            dataset_id=dataset.dataset_id,
+            feature_columns=features,
+            mtf_version=(MTF_FUSION_VERSION if mtf_enabled else None),
+            label_noise_version=LABEL_NOISE_VERSION,
         )
         candidates = {
             "hist_gradient_boosting": _hist_classifier(),
@@ -559,7 +620,16 @@ class AgentTrainer:
                 "schema_version": "agent_alpha_tournament_v4",
                 "dataset_id": dataset.dataset_id,
                 "feature_columns": list(features),
-                "feature_source": "canonical_feature_pipeline_v1",
+                "feature_source": (
+                    MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+                ),
+                "multitimeframe_version": (
+                    MTF_FUSION_VERSION if mtf_enabled else None
+                ),
+                "multitimeframe_contract_hash": (
+                    mtf_contract_hash(mtf_policy) if mtf_enabled else None
+                ),
+                "multitimeframe_selected_groups": mtf_selected_groups,
                 "timeframe": timeframe,
                 "horizon_bars": int(horizon_bars),
                 "minimum_net_move_bps": float(minimum_net_move_bps),
@@ -782,6 +852,17 @@ class AgentTrainer:
             "validation_rows": len(validation),
             "test_rows": len(test),
             "market_count": len(dataset.markets),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe": mtf_audit,
+            "multitimeframe_selected_groups": mtf_selected_groups,
             "label_noise_version": LABEL_NOISE_VERSION,
             "label_noise": label_noise_summary,
             "alpha_model": winner_name,
@@ -866,6 +947,16 @@ class AgentTrainer:
             "dataset_id": dataset.dataset_id,
             "dataset_rows": len(dataset.frame),
             "feature_columns": list(features),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe": mtf_audit,
             "markets": list(dataset.markets),
             "timeframe": timeframe,
             "horizon_bars": int(horizon_bars),

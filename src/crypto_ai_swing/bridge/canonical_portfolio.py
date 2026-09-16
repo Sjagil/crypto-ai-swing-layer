@@ -232,6 +232,8 @@ class CanonicalPortfolioRiskBridge:
                 )
             )
 
+        returns_by_market = self.returns_from_frames(frames)
+
         snapshot = risk_module.PortfolioSnapshot(
             equity_eur=float(equity_eur),
             cash_eur=float(cash_eur),
@@ -247,7 +249,7 @@ class CanonicalPortfolioRiskBridge:
             intelligence_timing_healthy=bool(
                 intelligence_timing_healthy
             ),
-            returns_by_market=self.returns_from_frames(frames),
+            returns_by_market=returns_by_market,
             drawdown_state=str(drawdown_state),
         )
 
@@ -290,6 +292,113 @@ class CanonicalPortfolioRiskBridge:
         ]
         if not canonical_approved:
             blockers.extend(reason_codes or ["CANONICAL_RISK_REJECTED"])
+
+        correlation_multiplier = 1.0
+        correlation_overlay: dict[str, Any] = {
+            "applied": False,
+            "approved": True,
+            "size_multiplier": 1.0,
+            "reason_codes": [],
+            "canonical_risk_never_widened": True,
+            "backend": "Sjagil/crypto:risk.correlation_analyzer.CorrelationAnalyzer",
+        }
+
+        if canonical_quantity > 0.0 and float(equity_eur) > 0.0:
+            try:
+                correlation_module = self.crypto.import_module(
+                    "risk.correlation_analyzer"
+                )
+                panel = pd.concat(
+                    returns_by_market,
+                    axis=1,
+                    copy=False,
+                ).sort_index()
+                existing_weights: dict[str, float] = {}
+                for row in self._position_rows(
+                    positions,
+                    exposure_eur=exposure_eur,
+                    open_risk_eur=open_risk_eur,
+                ):
+                    market = str(row.get("market") or "").upper()
+                    if market not in panel.columns:
+                        continue
+                    notional = (
+                        float(row.get("quantity") or 0.0)
+                        * float(row.get("mark_price") or 0.0)
+                    )
+                    if notional > 0.0:
+                        existing_weights[market] = (
+                            existing_weights.get(market, 0.0)
+                            + notional / float(equity_eur)
+                        )
+
+                proposed_weight = max(
+                    0.0,
+                    canonical_quantity
+                    * float(packet.entry_price)
+                    / float(equity_eur),
+                )
+                corr_cfg = dict(
+                    self.risk_config.get("correlation", {}) or {}
+                )
+                analyzer = correlation_module.CorrelationAnalyzer(
+                    window=int(corr_cfg.get("window", 90)),
+                    minimum_samples=int(corr_cfg.get("minimum_samples", 30)),
+                    cluster_threshold=float(
+                        corr_cfg.get("cluster_threshold", 0.75)
+                    ),
+                )
+                decision = analyzer.assess_proposal(
+                    market=packet.market,
+                    proposed_weight=proposed_weight,
+                    existing_weights=existing_weights,
+                    returns=panel,
+                    correlated_risk_cap=float(
+                        corr_cfg.get(
+                            "maximum_correlated_exposure_fraction",
+                            0.35,
+                        )
+                    ),
+                    large_position_threshold=float(
+                        corr_cfg.get("large_position_threshold", 0.10)
+                    ),
+                )
+                correlation_multiplier = max(
+                    0.0, min(1.0, float(decision.size_multiplier))
+                )
+                correlation_overlay = {
+                    "applied": True,
+                    "approved": bool(decision.approved),
+                    "size_multiplier": correlation_multiplier,
+                    "reason_codes": list(decision.reason_codes),
+                    "correlated_exposure": float(decision.correlated_exposure),
+                    "stale": bool(decision.stale),
+                    "canonical_risk_never_widened": True,
+                    "backend": "Sjagil/crypto:risk.correlation_analyzer.CorrelationAnalyzer",
+                }
+                if not decision.approved:
+                    blockers.extend(
+                        str(value)
+                        for value in (
+                            decision.reason_codes
+                            or ("CORRELATION_OVERLAY_REJECTED",)
+                        )
+                    )
+            except Exception as exc:
+                correlation_multiplier = (
+                    0.0 if packet.authority is Authority.LIVE else 0.5
+                )
+                correlation_overlay = {
+                    "applied": False,
+                    "approved": packet.authority is not Authority.LIVE,
+                    "size_multiplier": correlation_multiplier,
+                    "reason_codes": ["CORRELATION_ANALYZER_UNAVAILABLE"],
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                    "canonical_risk_never_widened": True,
+                    "backend": "Sjagil/crypto:risk.correlation_analyzer.CorrelationAnalyzer",
+                }
+                if packet.authority is Authority.LIVE:
+                    blockers.append("CORRELATION_ANALYZER_UNAVAILABLE")
 
         kcfg = dict(self.risk_config.get("kelly", {}) or {})
         trade_cfg = dict(self.risk_config.get("trade", {}) or {})
@@ -408,7 +517,7 @@ class CanonicalPortfolioRiskBridge:
         ):
             blockers.append("CALIBRATED_PROBABILITY_REQUIRED_FOR_LIVE")
 
-        final_quantity = canonical_quantity
+        final_quantity = canonical_quantity * correlation_multiplier
         if kelly_size is not None:
             # AI/Kelly can only reduce the canonical RiskManager quantity.
             final_quantity = min(
@@ -478,5 +587,6 @@ class CanonicalPortfolioRiskBridge:
                 "snapshot_exposure_eur": float(snapshot.exposure_eur),
                 "snapshot_open_risk_eur": float(snapshot.open_risk_eur),
                 "backend": "Sjagil/crypto:risk.risk_manager.RiskManager",
+                "correlation_overlay": correlation_overlay,
             },
         )

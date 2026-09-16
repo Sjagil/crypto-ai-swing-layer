@@ -230,8 +230,9 @@ def _strategy_features(
     bridge: Any,
     raw_ohlcv: pd.DataFrame,
     features: pd.DataFrame,
+    *,
+    timeframe: str,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    out = pd.DataFrame(index=features.index)
     report: dict[str, Any] = {
         "authority": "RESEARCH_FEATURES_ONLY",
         "orders_generated": 0,
@@ -242,6 +243,7 @@ def _strategy_features(
         "skipped_higher_timeframe": [],
         "failed": {},
         "tactical_catalogue": {},
+        "dataframe_batching": "DICT_THEN_SINGLE_DATAFRAME",
     }
 
     strategy_frame = features.copy()
@@ -252,14 +254,14 @@ def _strategy_features(
                 errors="coerce",
             ).reindex(strategy_frame.index)
 
+    columns: dict[str, pd.Series] = {}
+
     try:
         module = bridge.import_module("research.strategies")
         registry = dict(module.strategy_registry())
     except Exception as exc:
-        report["failed"]["registry"] = (
-            f"{type(exc).__name__}:{str(exc)[:300]}"
-        )
-        return out, report
+        report["failed"]["registry"] = f"{type(exc).__name__}:{str(exc)[:300]}"
+        return pd.DataFrame(index=features.index), report
 
     report["registered"] = len(registry)
     family_entries: dict[str, list[pd.Series]] = defaultdict(list)
@@ -273,36 +275,48 @@ def _strategy_features(
         if bool(getattr(strategy, "uses_intelligence", False)):
             report["skipped_intelligence"].append(sid)
             continue
+
         required_htf = tuple(
             getattr(strategy, "required_higher_timeframes", ()) or ()
         )
         if required_htf:
-            report["skipped_higher_timeframe"].append(
-                {
-                    "strategy_id": sid,
-                    "required_higher_timeframes": list(required_htf),
-                }
-            )
-            continue
+            missing_htf = [
+                selected
+                for selected in required_htf
+                if not any(
+                    str(column).lower().startswith(
+                        f"htf_{str(selected).lower()}_"
+                    )
+                    for column in strategy_frame.columns
+                )
+            ]
+            if missing_htf:
+                report["skipped_higher_timeframe"].append(
+                    {
+                        "strategy_id": sid,
+                        "required_higher_timeframes": list(required_htf),
+                        "missing_higher_timeframes": missing_htf,
+                    }
+                )
+                continue
+
         try:
             generated = strategy.generate(strategy_frame)
         except Exception as exc:
-            report["failed"][sid] = (
-                f"{type(exc).__name__}:{str(exc)[:300]}"
-            )
+            report["failed"][sid] = f"{type(exc).__name__}:{str(exc)[:300]}"
             continue
 
         entry = _as_float_bool(generated.entry, strategy_frame.index)
         exit_signal = _as_float_bool(generated.exit, strategy_frame.index)
         reduce_signal = _as_float_bool(generated.reduce, strategy_frame.index)
-
         base = f"{STRATEGY_PREFIX}{sid}"
-        out[f"{base}_entry"] = entry
-        out[f"{base}_exit"] = exit_signal
-        out[f"{base}_reduce"] = reduce_signal
-        out[f"{base}_entry_density_12"] = _rolling_signal_density(entry)
-        out[f"{base}_exit_density_12"] = _rolling_signal_density(exit_signal)
-        out[f"{base}_entry_recency"] = _recency_score(
+
+        columns[f"{base}_entry"] = entry
+        columns[f"{base}_exit"] = exit_signal
+        columns[f"{base}_reduce"] = reduce_signal
+        columns[f"{base}_entry_density_12"] = _rolling_signal_density(entry)
+        columns[f"{base}_exit_density_12"] = _rolling_signal_density(exit_signal)
+        columns[f"{base}_entry_recency"] = _recency_score(
             generated.entry.reindex(strategy_frame.index)
         )
 
@@ -314,36 +328,99 @@ def _strategy_features(
 
     def stack_mean(rows: list[pd.Series]) -> pd.Series:
         if not rows:
-            return pd.Series(np.nan, index=features.index)
-        return pd.concat(rows, axis=1).mean(axis=1)
+            return pd.Series(np.nan, index=features.index, dtype=float)
+        return pd.concat(rows, axis=1, copy=False).mean(axis=1)
 
     for family in sorted(family_entries):
         slug = family.replace("-", "_").replace(" ", "_")
-        out[f"crypto_strategy_family_{slug}_entry_share"] = stack_mean(
+        columns[f"crypto_strategy_family_{slug}_entry_share"] = stack_mean(
             family_entries[family]
         )
-        out[f"crypto_strategy_family_{slug}_exit_share"] = stack_mean(
+        columns[f"crypto_strategy_family_{slug}_exit_share"] = stack_mean(
             family_exits[family]
         )
 
     if all_entries:
-        entry_matrix = pd.concat(all_entries, axis=1)
-        exit_matrix = pd.concat(all_exits, axis=1)
-        out["crypto_strategy_entry_consensus"] = entry_matrix.mean(axis=1)
-        out["crypto_strategy_exit_consensus"] = exit_matrix.mean(axis=1)
-        out["crypto_strategy_entry_count"] = entry_matrix.sum(axis=1)
-        out["crypto_strategy_exit_count"] = exit_matrix.sum(axis=1)
-        out["crypto_strategy_entry_consensus_12"] = (
-            out["crypto_strategy_entry_consensus"]
-            .rolling(12, min_periods=1)
-            .mean()
+        entry_matrix = pd.concat(all_entries, axis=1, copy=False)
+        exit_matrix = pd.concat(all_exits, axis=1, copy=False)
+        entry_consensus = entry_matrix.mean(axis=1)
+        columns["crypto_strategy_entry_consensus"] = entry_consensus
+        columns["crypto_strategy_exit_consensus"] = exit_matrix.mean(axis=1)
+        columns["crypto_strategy_entry_count"] = entry_matrix.sum(axis=1)
+        columns["crypto_strategy_exit_count"] = exit_matrix.sum(axis=1)
+        columns["crypto_strategy_entry_consensus_12"] = (
+            entry_consensus.rolling(12, min_periods=1).mean()
         )
 
     try:
         tactical = bridge.import_module("research.tactical_multitimeframe")
         specs = tuple(tactical.tactical_strategy_specs())
+        tactical_registry = dict(tactical.tactical_strategy_registry())
+        tactical_entries: list[pd.Series] = []
+        tactical_exits: list[pd.Series] = []
+        tactical_family_entries: dict[str, list[pd.Series]] = defaultdict(list)
+        integrated_tactical: list[str] = []
+        selected_timeframe = "1w" if str(timeframe).lower() == "1w" else str(timeframe)
+
+        for tactical_id, strategy in sorted(tactical_registry.items()):
+            spec = getattr(strategy, "spec", None)
+            if spec is None or str(spec.timeframe).lower() != selected_timeframe.lower():
+                continue
+            required = (
+                str(spec.confirmation_timeframe),
+                str(spec.regime_timeframe),
+            )
+            if any(
+                not any(
+                    str(column).lower().startswith(f"htf_{required_tf.lower()}_")
+                    for column in strategy_frame.columns
+                )
+                for required_tf in required
+            ):
+                continue
+            try:
+                generated = strategy.generate(strategy_frame)
+            except Exception as exc:
+                report["failed"][str(tactical_id).lower()] = (
+                    f"{type(exc).__name__}:{str(exc)[:300]}"
+                )
+                continue
+
+            entry = _as_float_bool(generated.entry, strategy_frame.index)
+            exit_signal = _as_float_bool(generated.exit, strategy_frame.index)
+            slug = str(tactical_id).lower()
+            family = str(getattr(spec, "family", "unknown")).lower()
+            base = f"crypto_tactical_{slug}"
+
+            columns[f"{base}_entry"] = entry
+            columns[f"{base}_exit"] = exit_signal
+            columns[f"{base}_entry_density_12"] = _rolling_signal_density(entry)
+            columns[f"{base}_exit_density_12"] = _rolling_signal_density(exit_signal)
+            columns[f"{base}_entry_recency"] = _recency_score(
+                generated.entry.reindex(strategy_frame.index)
+            )
+            tactical_entries.append(entry)
+            tactical_exits.append(exit_signal)
+            tactical_family_entries[family].append(entry)
+            integrated_tactical.append(slug)
+
+        if tactical_entries:
+            columns["crypto_tactical_entry_consensus"] = pd.concat(
+                tactical_entries, axis=1, copy=False
+            ).mean(axis=1)
+            columns["crypto_tactical_exit_consensus"] = pd.concat(
+                tactical_exits, axis=1, copy=False
+            ).mean(axis=1)
+            for family, rows in sorted(tactical_family_entries.items()):
+                family_slug = family.replace("-", "_").replace(" ", "_")
+                columns[
+                    f"crypto_tactical_family_{family_slug}_entry_share"
+                ] = pd.concat(rows, axis=1, copy=False).mean(axis=1)
+
         report["tactical_catalogue"] = {
             "registered": len(specs),
+            "integrated": integrated_tactical,
+            "integrated_count": len(integrated_tactical),
             "families": sorted(
                 {
                     str(getattr(spec, "family", ""))
@@ -358,7 +435,7 @@ def _strategy_features(
                     if str(getattr(spec, "timeframe", ""))
                 }
             ),
-            "authority": "CATALOGUE_ONLY_NO_EXECUTION_AUTHORITY",
+            "authority": "RESEARCH_FEATURES_ONLY_NO_EXECUTION_AUTHORITY",
         }
     except Exception as exc:
         report["tactical_catalogue"] = {
@@ -366,7 +443,11 @@ def _strategy_features(
             "error": f"{type(exc).__name__}:{str(exc)[:300]}",
         }
 
-    return out.replace([np.inf, -np.inf], np.nan), report
+    if not columns:
+        return pd.DataFrame(index=features.index), report
+
+    out = pd.DataFrame(columns, index=features.index)
+    return out.replace([np.inf, -np.inf], np.nan).copy(), report
 
 
 def augment_canonical_model_features(
@@ -388,11 +469,12 @@ def augment_canonical_model_features(
         bridge,
         raw_ohlcv,
         features,
+        timeframe=timeframe,
     )
 
     parts = [features, technical, strategies]
-    result = pd.concat(parts, axis=1)
-    result = result.loc[:, ~result.columns.duplicated(keep="last")]
+    result = pd.concat(parts, axis=1, copy=False)
+    result = result.loc[:, ~result.columns.duplicated(keep="last")].copy()
     result.attrs.update(features.attrs)
     result.attrs.update(
         {

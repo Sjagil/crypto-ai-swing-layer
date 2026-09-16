@@ -11,6 +11,11 @@ import pandas as pd
 
 from crypto_ai_swing.agents.council import AgentCouncilDecision, build_council_decision
 from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    build_runtime_mtf_feature_frame,
+    resolve_mtf_policy,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.data.features import build_features as legacy_build_features
 
@@ -153,7 +158,39 @@ class AgentRuntime:
                 )
 
         features = tuple(bundle.get("feature_columns") or ())
-        if bundle.get("feature_source") == "canonical_feature_pipeline_v1":
+        feature_source = str(bundle.get("feature_source") or "")
+        if feature_source == MTF_FEATURE_SOURCE:
+            try:
+                mtf_policy = resolve_mtf_policy(
+                    dict(
+                        (getattr(self.settings, "agents", {}) or {}).get(
+                            "multitimeframe", {}
+                        )
+                        or {}
+                    )
+                )
+                feat, mtf_runtime_audit = build_runtime_mtf_feature_frame(
+                    self.crypto,
+                    market=str(market).upper(),
+                    policy=mtf_policy,
+                    concurrency=1,
+                )
+                context["mtf_runtime"] = mtf_runtime_audit
+            except Exception as exc:
+                context["mtf_runtime"] = {
+                    "ready": False,
+                    "error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                }
+                return build_council_decision(
+                    {},
+                    context,
+                    artifact_status="MTF_CONTEXT_NOT_READY",
+                    live_decision_influence=False,
+                    mode=self.mode,
+                    shadow_decision_qualified=False,
+                    head_qualifications={},
+                )
+        elif feature_source == "canonical_feature_pipeline_v1":
             feat = canonical_model_frame(
                 self.crypto,
                 frame,

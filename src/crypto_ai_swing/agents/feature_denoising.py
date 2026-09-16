@@ -10,16 +10,74 @@ import pandas as pd
 
 NOISE_CONTROL_VERSION = "round47f_noise_control_v1"
 DEFAULT_STABILITY_BLOCKS = 4
+MAX_FEATURE_SELECTION_ROWS = 100_000
+
+
+def _bounded_train_selection_sample(
+    train: pd.DataFrame,
+    target: pd.Series | None,
+    *,
+    maximum_rows: int = MAX_FEATURE_SELECTION_ROWS,
+) -> tuple[pd.DataFrame, pd.Series | None]:
+    if len(train) <= int(maximum_rows):
+        selected_target = (
+            _as_numeric_positional(target, length=len(train))
+            if target is not None
+            else None
+        )
+        return train, selected_target
+
+    maximum_rows = max(1_000, int(maximum_rows))
+    positions: list[int] = []
+    if "market" in train.columns:
+        markets = train["market"].astype(str).to_numpy()
+        names = sorted(set(markets))
+        quota = max(50, maximum_rows // max(1, len(names)))
+        for market in names:
+            available = np.flatnonzero(markets == market)
+            if len(available) <= quota:
+                positions.extend(int(v) for v in available)
+            else:
+                local = np.linspace(0, len(available) - 1, quota, dtype=int)
+                positions.extend(int(available[index]) for index in local)
+
+    if len(positions) < maximum_rows:
+        already = set(positions)
+        for value in np.linspace(
+            0, len(train) - 1, maximum_rows, dtype=int
+        ):
+            index = int(value)
+            if index not in already:
+                positions.append(index)
+                already.add(index)
+            if len(positions) >= maximum_rows:
+                break
+
+    positions = sorted(set(positions))[:maximum_rows]
+    sampled = train.iloc[positions]
+    sampled_target = None
+    if target is not None:
+        numeric_target = _as_numeric_positional(target, length=len(train))
+        sampled_target = numeric_target.iloc[positions].reset_index(drop=True)
+    return sampled, sampled_target
+
+
 
 _GROUP_WEIGHTS = {
-    "pattern": 0.20,
-    "strategy": 0.11,
-    "vwap": 0.08,
-    "index": 0.10,
-    "structure": 0.10,
-    "volume_liquidity": 0.10,
-    "volatility": 0.08,
-    "core": 0.23,
+    "pattern": 0.13,
+    "strategy": 0.07,
+    "vwap": 0.05,
+    "index": 0.06,
+    "structure": 0.06,
+    "volume_liquidity": 0.06,
+    "volatility": 0.05,
+    "core": 0.12,
+    "mtf_1h": 0.08,
+    "mtf_2h": 0.07,
+    "mtf_4h": 0.08,
+    "mtf_1d": 0.07,
+    "mtf_1w": 0.03,
+    "mtf_cross": 0.07,
 }
 
 _GROUP_ORDER = (
@@ -31,6 +89,12 @@ _GROUP_ORDER = (
     "volume_liquidity",
     "volatility",
     "core",
+    "mtf_1h",
+    "mtf_2h",
+    "mtf_4h",
+    "mtf_1d",
+    "mtf_1w",
+    "mtf_cross",
 )
 
 
@@ -53,9 +117,19 @@ class FeatureScore:
 def feature_group(name: str) -> str:
     token = str(name).lower()
 
+    for timeframe in ("1h", "2h", "4h", "1d", "1w"):
+        if token.startswith(f"mtf_{timeframe}__") or token.startswith(f"htf_{timeframe}_"):
+            return f"mtf_{timeframe}"
+    if token.startswith("mtf_cross__"):
+        return "mtf_cross"
+
     if token.startswith("pattern_"):
         return "pattern"
-    if token.startswith("crypto_strategy_") or token.startswith("strategy_family_"):
+    if (
+        token.startswith("crypto_strategy_")
+        or token.startswith("crypto_tactical_")
+        or token.startswith("strategy_family_")
+    ):
         return "strategy"
     if (
         token.startswith("crypto_vwap")
@@ -442,10 +516,15 @@ def select_stable_train_features(
     maximum_abs_correlation: float = 0.95,
     stability_blocks: int = DEFAULT_STABILITY_BLOCKS,
 ) -> tuple[str, ...]:
-    diagnostics = feature_selection_diagnostics(
+    scoring_train, scoring_target = _bounded_train_selection_sample(
         train,
+        target,
+        maximum_rows=MAX_FEATURE_SELECTION_ROWS,
+    )
+    diagnostics = feature_selection_diagnostics(
+        scoring_train,
         candidates,
-        target=target,
+        target=scoring_target,
         minimum_coverage=minimum_coverage,
         stability_blocks=stability_blocks,
     )
@@ -457,10 +536,12 @@ def select_stable_train_features(
         by_group[str(row["group"])].append(row)
 
     ordered_names = [str(row["name"]) for row in diagnostics]
-    numeric = train.reindex(columns=ordered_names).apply(
-        pd.to_numeric,
-        errors="coerce",
+    numeric = scoring_train.reindex(columns=ordered_names).apply(
+        pd.to_numeric, errors="coerce"
     )
+    for name in numeric.columns:
+        if pd.api.types.is_float_dtype(numeric[name]):
+            numeric[name] = numeric[name].astype(np.float32, copy=False)
     corr = numeric.corr(method="spearman").abs()
 
     def redundant(name: str, selected: list[str]) -> bool:
@@ -474,14 +555,9 @@ def select_stable_train_features(
 
     budgets = _group_budgets(maximum_features)
     selected: list[str] = []
-
     for group in _GROUP_ORDER:
-        rows = by_group.get(group, [])
-        if not rows:
-            continue
-
         rows = sorted(
-            rows,
+            by_group.get(group, []),
             key=lambda row: (
                 -float(row["stability_score"]),
                 -float(row["unsupervised_quality"]),
@@ -489,21 +565,19 @@ def select_stable_train_features(
                 str(row["name"]),
             ),
         )
-
+        if not rows:
+            continue
         budget = budgets[group]
         exploration_floor = max(1, budget // 4)
         accepted = 0
-
         for rank, row in enumerate(rows):
             name = str(row["name"])
             stable = float(row["stability_score"]) >= 0.002
             exploratory = rank < exploration_floor
-
-            if target is not None and not (stable or exploratory):
+            if scoring_target is not None and not (stable or exploratory):
                 continue
             if redundant(name, selected):
                 continue
-
             selected.append(name)
             accepted += 1
             if accepted >= budget:
@@ -514,14 +588,12 @@ def select_stable_train_features(
             name = str(row["name"])
             if name in selected or redundant(name, selected):
                 continue
-
-            if target is not None:
+            if scoring_target is not None:
                 if (
                     float(row["stability_score"]) < 0.001
                     and len(selected) >= max(8, int(maximum_features * 0.75))
                 ):
                     continue
-
             selected.append(name)
             if len(selected) >= int(maximum_features):
                 break
