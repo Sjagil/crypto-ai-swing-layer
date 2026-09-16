@@ -41,6 +41,11 @@ def main() -> int:
     mode = run_json(root, python, ["mode-preflight", "--target", "canary"])
     state = run_json(root, python, ["mode-status"])
 
+    # mode-preflight is the authoritative source for both
+    # prospective evidence and canonical live-canary readiness.
+    readiness = dict(mode.get("prospective_readiness") or {})
+    canary = dict(mode.get("live_gate") or {})
+
     failures: list[str] = []
     if readiness.get("eligible") is not True:
         failures.extend(

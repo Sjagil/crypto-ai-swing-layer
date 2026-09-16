@@ -1,7 +1,7 @@
 {
   "automatic_live_promotion": false,
   "branch": "main",
-  "commit": "e288ff5619a3fb55f98c16bf021aba39ef0a4d2a",
+  "commit": "1119b279b8f92af641d952cfe8ff76d23b3ef166",
   "live_requires_clean_checkout": true,
   "live_requires_exact_head": true,
   "ownership_contract": "config/canonical_ownership.yaml",
