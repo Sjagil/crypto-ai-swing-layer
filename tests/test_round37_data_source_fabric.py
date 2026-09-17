@@ -177,3 +177,44 @@ def test_swing_env_loader_does_not_import_canonical_authority_keys(
     assert env["CRYPTO_SWING_MARKETS"] == "BTC-EUR,ETH-EUR"
     assert "LIVE_TRADING_ALLOWED" not in env
     assert "BITVAVO_TRADE_API_KEY" not in env
+
+
+def test_canonical_environment_cannot_override_crypto_repo_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+
+    (canonical / ".env").write_text(
+        "CRYPTO_REPO_PATH=/stale/mac/path\n"
+        "LIVE_TRADING_ALLOWED=false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv(
+        "CRYPTO_REPO_PATH",
+        "/node/local/crypto",
+    )
+
+    result = hydrate_canonical_environment(
+        canonical
+    )
+
+    env = __import__("os").environ
+
+    assert (
+        env["CRYPTO_REPO_PATH"]
+        == "/node/local/crypto"
+    )
+    assert (
+        "CRYPTO_REPO_PATH"
+        not in result["overridden_keys"]
+    )
+    assert (
+        "CRYPTO_REPO_PATH"
+        not in result["conflict_keys"]
+    )
+
+    # Canonical-owned engine values must still work.
+    assert env["LIVE_TRADING_ALLOWED"] == "false"
