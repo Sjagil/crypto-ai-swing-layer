@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -16,6 +17,11 @@ from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
 from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
 from crypto_ai_swing.agents.rl_runtime import RLRuntime
 from crypto_ai_swing.agents.runtime import AgentRuntime
+from crypto_ai_swing.models.adaptive_model_averaging import (
+    ModelVote,
+    blend_probabilities,
+)
+from crypto_ai_swing.models.tcn_gru_runtime import TCNGRURuntime
 from crypto_ai_swing.bridge.crypto_library import (
     CryptoLibraryBridge,
 )
@@ -244,6 +250,7 @@ class ProactiveTrader:
             decision_bucket_minutes=int(forward_cfg.get("decision_bucket_minutes", 15)),
         )
         self.agents = AgentRuntime(settings, mode=self.mode)
+        self.tcn_gru = TCNGRURuntime(settings, mode=self.mode)
         self.rl = RLRuntime(settings, mode=self.mode)
         self.cmc_context = CMCContextCollector(settings)
         self.round44 = ComprehensiveIntelligenceEngine(settings)
@@ -557,12 +564,22 @@ class ProactiveTrader:
                 "execution_backend": "shadow_or_paper",
             }
         readiness = self._prospective_canary_readiness()
+        full_live = (
+            os.getenv("CRYPTO_SWING_FULL_LIVE", "")
+            .strip()
+            .upper()
+            == "YES"
+        )
         validation_canary = bool(
             (getattr(intent, "metadata", None) or {}).get(
                 "execution_validation_canary", False
             )
         )
-        if not bool(readiness.get("eligible")) and not validation_canary:
+        if (
+            not full_live
+            and not bool(readiness.get("eligible"))
+            and not validation_canary
+        ):
             return {
                 "mode": "live",
                 "accepted": False,
@@ -573,7 +590,7 @@ class ProactiveTrader:
                 "orders_submitted": 0,
             }
 
-        if validation_canary:
+        if validation_canary and not full_live:
             cfg = execution_validation_canary_config(
                 self.settings.proactive
             )
@@ -636,8 +653,13 @@ class ProactiveTrader:
             return {
                 "mode": "live",
                 "execution_backend": "Sjagil/crypto:core.swing_layer_live",
-                "execution_validation_canary": validation_canary,
-                "economic_edge_unproven": validation_canary,
+                "execution_validation_canary": (
+                    validation_canary and not full_live
+                ),
+                "full_live": full_live,
+                "economic_edge_unproven": (
+                    validation_canary and not full_live
+                ),
                 "alpha_evidence_authorized": False,
                 "autoscale_authorized": bool(
                     (getattr(intent, "metadata", None) or {}).get(
@@ -1281,10 +1303,44 @@ class ProactiveTrader:
                 head_influence = dict(
                     agent_decision.diagnostics.get("head_influence") or {}
                 )
-                context[market]["ml_probability"] = (
+                base_probability = (
                     agent_decision.alpha_probability
                     if head_influence.get("alpha")
                     else None
+                )
+                temporal_decision = self.tcn_gru.predict_frame(
+                    market,
+                    frame,
+                )
+                context[market]["tcn_gru"] = temporal_decision
+                ensemble = blend_probabilities(
+                    [
+                        ModelVote(
+                            "supervised",
+                            base_probability,
+                            bool(
+                                base_probability is not None
+                                and head_influence.get("alpha")
+                            ),
+                            (self.agents.status().get("metrics") or {}),
+                        ),
+                        ModelVote(
+                            "tcn_gru",
+                            temporal_decision.get("probability"),
+                            bool(
+                                temporal_decision.get("qualified")
+                                and temporal_decision.get(
+                                    "live_decision_influence",
+                                    self.mode != "live",
+                                )
+                            ),
+                            temporal_decision.get("metrics") or {},
+                        ),
+                    ]
+                )
+                context[market]["ml_ensemble"] = ensemble
+                context[market]["ml_probability"] = ensemble.get(
+                    "probability"
                 )
                 context[market]["forecast_score"] = (agent_decision.forecast_score if head_influence.get("return") else None)
                 context[market]["predicted_return"] = (agent_decision.predicted_return if head_influence.get("return") else None)

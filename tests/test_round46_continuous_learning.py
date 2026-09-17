@@ -98,6 +98,6 @@ def test_governor_promotes_qualified_supervised_candidate(tmp_path):
         (root / "live.pointer.json").read_text(encoding="utf-8")
     )
     promoted = joblib.load(Path(live["artifact_path"]))
-    assert promoted["status"] == "CANARY"
+    assert promoted["status"] == "LIVE_QUALIFIED"
     assert promoted["live_decision_influence"] is True
     assert promoted["execution_authority_granted"] is False

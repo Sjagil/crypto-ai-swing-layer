@@ -57,7 +57,7 @@ class _Operations:
         path.write_text(json.dumps(payload, default=str), encoding="utf-8")
 
 
-def test_round41_agent_manager_trains_missing_agents_but_never_promotes_live(
+def test_round41_agent_manager_trains_missing_agents_and_promotes_models_only(
     tmp_path,
 ):
     settings = SimpleNamespace(
@@ -99,5 +99,5 @@ def test_round41_agent_manager_trains_missing_agents_but_never_promotes_live(
     assert _Trainer.calls == 1
     assert _RLTrainer.calls == 1
     assert payload["automatic_live_authority"] is False
-    assert payload["automatic_model_live_promotion"] is False
+    assert payload["automatic_model_live_promotion"] is True
     assert payload["orders_submitted"] == 0

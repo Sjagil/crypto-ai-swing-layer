@@ -176,15 +176,15 @@ correlation:
   minimum_samples: 30
   cluster_threshold: 0.75
   maximum_correlated_exposure_fraction: 0.35
-  large_position_threshold: 0.10
+  large_position_threshold: 0.1
 live_promotion:
   enabled: true
   supervised_enabled: true
   rl_enabled: true
   minimum_supervised_rows: 8000
-  minimum_promotion_score_delta: 0.0
-  minimum_rl_promotion_score_delta: 0.0
-  promotion_status: CANARY
+  minimum_promotion_score_delta: 1.0e-06
+  minimum_rl_promotion_score_delta: 1.0e-06
+  promotion_status: LIVE_QUALIFIED
   model_influence_only: true
   may_grant_execution_authority: false
   may_change_capital_caps: false
@@ -197,3 +197,15 @@ continuous_learning:
   continuous_backtesting: true
   continuous_model_training: true
   qualified_models_have_live_influence: true
+  continuous_data_collection: true
+  automatic_model_live_promotion: true
+tcn_gru:
+  enabled: true
+  role: continuous_challenger
+  timeframe: 1h
+  horizon_bars: 4
+  lookback: 64
+  retrain_seconds: 21600
+  minimum_rows: 8000
+  automatic_live_promotion: true
+  live_decision_influence_requires_qualification: true

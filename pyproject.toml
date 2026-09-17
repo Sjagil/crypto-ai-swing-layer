@@ -46,6 +46,7 @@ ai = [
   "safetensors>=0.4,<1"
 ]
 research = [
+  "statsmodels>=0.14,<1",
   "optuna>=4,<5",
   "skfolio>=0.12,<1",
   "vectorbt>=0.28,<1",

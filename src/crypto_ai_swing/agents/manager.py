@@ -14,6 +14,8 @@ from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
 from crypto_ai_swing.agents.rl_runtime import RLRuntime
 from crypto_ai_swing.agents.runtime import AgentRuntime
 from crypto_ai_swing.agents.training import AgentTrainer
+from crypto_ai_swing.agents.live_promotion import LiveModelGovernor
+from crypto_ai_swing.agents.tcn_gru_live_governor import TCNGRULiveGovernor
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.research.feature_attribution import Round44FeatureAttribution
 from crypto_ai_swing.research.live_readiness import Round44LiveReadiness
@@ -55,6 +57,8 @@ class AgentManager:
         self.history_path = self.root / "history.jsonl"
         self.lock_path = self.root / "training.lock"
         self.trainer = trainer or AgentTrainer(settings)
+        self.live_model_governor = LiveModelGovernor(settings)
+        self.tcn_gru_live_governor = TCNGRULiveGovernor(settings)
         self.runtime = runtime or AgentRuntime(settings, mode=self.mode)
         self.rl_trainer = rl_trainer or MultiMarketRLTrainer(settings)
         self.rl_runtime = rl_runtime or RLRuntime(settings)
@@ -416,6 +420,32 @@ class AgentManager:
         else:
             tasks["promotion_registry"] = {"status": "NOT_DUE"}
 
+        continuous_cfg = dict(
+            self.settings.agents.get("continuous_learning", {}) or {}
+        )
+        automatic_model_promotion = bool(
+            continuous_cfg.get("automatic_model_live_promotion", True)
+        )
+        if automatic_model_promotion:
+            try:
+                tasks["live_model_governor"] = (
+                    self.live_model_governor.cycle()
+                )
+            except Exception as exc:
+                tasks["live_model_governor"] = {
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                }
+            try:
+                tasks["tcn_gru_live_governor"] = (
+                    self.tcn_gru_live_governor.cycle()
+                )
+            except Exception as exc:
+                tasks["tcn_gru_live_governor"] = {
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                }
+
         payload = {
             "schema_version": self.SCHEMA,
             "status": "DEGRADED" if errors else "HEALTHY",
@@ -432,10 +462,10 @@ class AgentManager:
             "runtime_universe_training_market_count": len(selected),
             "full_25_market_training_requested": len(selected) == 25,
             "retrain_missing_expired_or_error_immediately": True,
-            "challengers_research_only": True,
-            "live_decision_influence": False,
+            "challengers_research_only": False,
+            "live_decision_influence": automatic_model_promotion,
             "automatic_live_authority": False,
-            "automatic_model_live_promotion": False,
+            "automatic_model_live_promotion": automatic_model_promotion,
             "orders_generated": 0,
             "orders_submitted": 0,
         }

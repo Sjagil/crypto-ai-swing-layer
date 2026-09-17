@@ -1,7 +1,7 @@
 {
   "automatic_live_promotion": false,
-  "branch": "main",
-  "commit": "1119b279b8f92af641d952cfe8ff76d23b3ef166",
+  "branch": "feature/full-live-quant-machine-v1",
+  "commit": "4bbb76a33c565a08f7a90f02988e03c6c2625d71",
   "live_requires_clean_checkout": true,
   "live_requires_exact_head": true,
   "ownership_contract": "config/canonical_ownership.yaml",

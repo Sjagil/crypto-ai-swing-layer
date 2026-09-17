@@ -166,7 +166,7 @@ class LiveModelGovernor:
         promoted = copy.deepcopy(candidate)
         promoted.update(
             {
-                "status": "CANARY",
+                "status": "LIVE_QUALIFIED",
                 "live_decision_influence": True,
                 "automatic_live_promotion": True,
                 "promoted_at": _now(),
@@ -222,7 +222,7 @@ class LiveModelGovernor:
             "manifest_path": str(manifest_path.resolve()),
             "artifact_hash": artifact_hash,
             "source_artifact_hash": source_hash,
-            "status": "CANARY",
+            "status": "LIVE_QUALIFIED",
             "live_decision_influence": True,
             "head_qualifications": promoted.get("head_qualifications") or {},
             "promotion_score": score,
@@ -305,7 +305,7 @@ class LiveModelGovernor:
 
         live_manifest = {
             **manifest,
-            "status": "CANARY",
+            "status": "LIVE_QUALIFIED",
             "live_decision_influence": True,
             "automatic_live_promotion": True,
             "promoted_at": _now(),
@@ -343,7 +343,7 @@ class LiveModelGovernor:
             "manifest_path": str(live_manifest_path.resolve()),
             "source_artifact_path": source_artifact,
             "qualified": True,
-            "status": "CANARY",
+            "status": "LIVE_QUALIFIED",
             "live_decision_influence": True,
             "promotion_score": score,
             "promoted_at": _now(),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -215,7 +216,15 @@ class SwingPipeline:
                 context=context,
                 proactive=self.settings.proactive,
             )
-            canary_allowed = bool(validation.get("allowed"))
+            full_live = (
+                os.getenv("CRYPTO_SWING_FULL_LIVE", "")
+                .strip()
+                .upper()
+                == "YES"
+            )
+            canary_allowed = bool(
+                validation.get("allowed")
+            ) and not full_live
             uncalibrated_edge = (
                 signal.edge_source
                 == "HEURISTIC_SCORE_PROXY_RESEARCH_ONLY"
@@ -333,6 +342,7 @@ class SwingPipeline:
                     "portfolio_heat_after": risk.portfolio_heat_after,
                     "crypto_repo_context": context,
                     "execution_validation_canary": canary_allowed,
+                    "full_live": full_live,
                     "execution_validation_canary_policy": (
                         validation if canary_allowed else None
                     ),

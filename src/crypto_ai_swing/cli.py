@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -599,15 +600,37 @@ def proactive(
         )
     s = _settings()
     if mode == "live":
-        controller = ModeController(s)
-        mode_state = controller.status()
-        if mode_state.get("selected_mode") != "canary":
-            console.print_json(json.dumps({"status": "BLOCKED", "reason": "PERSISTENT_CANARY_MODE_NOT_SELECTED", "selected_mode": mode_state.get("selected_mode"), "orders_submitted": 0}))
-            raise typer.Exit(code=2)
-        live_preflight = controller.preflight("canary")
-        if not bool(live_preflight.get("ready")):
-            console.print_json(json.dumps({"status": "BLOCKED", "reason": "CANARY_MODE_PREFLIGHT_NOT_READY", "preflight": live_preflight, "orders_submitted": 0}, default=str))
-            raise typer.Exit(code=2)
+        full_live = (
+            os.getenv("CRYPTO_SWING_FULL_LIVE", "")
+            .strip()
+            .upper()
+            == "YES"
+        )
+        if full_live:
+            gate = CryptoAuthorityAdapter(s.crypto_repo_root).gate_status()
+            if not bool(gate.get("ready")):
+                console.print_json(
+                    json.dumps(
+                        {
+                            "status": "BLOCKED",
+                            "reason": "FULL_LIVE_CANONICAL_GATE_NOT_READY",
+                            "canonical_gate": gate,
+                            "orders_submitted": 0,
+                        },
+                        default=str,
+                    )
+                )
+                raise typer.Exit(code=2)
+        else:
+            controller = ModeController(s)
+            mode_state = controller.status()
+            if mode_state.get("selected_mode") != "canary":
+                console.print_json(json.dumps({"status": "BLOCKED", "reason": "PERSISTENT_CANARY_MODE_NOT_SELECTED", "selected_mode": mode_state.get("selected_mode"), "orders_submitted": 0}))
+                raise typer.Exit(code=2)
+            live_preflight = controller.preflight("canary")
+            if not bool(live_preflight.get("ready")):
+                console.print_json(json.dumps({"status": "BLOCKED", "reason": "CANARY_MODE_PREFLIGHT_NOT_READY", "preflight": live_preflight, "orders_submitted": 0}, default=str))
+                raise typer.Exit(code=2)
     trader = ProactiveTrader(s, mode=mode)
     try:
         if once:

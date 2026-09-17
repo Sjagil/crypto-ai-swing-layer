@@ -84,3 +84,10 @@ timeframe_pipeline:
   weekly_bullish_confirmation_score: 0.45
   minimum_macro_score_for_long: 0.0
   minimum_trend_score_for_long: 0.0
+full_live:
+  enabled: true
+  require_calibrated_edge: true
+  require_canonical_preflight: true
+  require_post_submit_reconciliation: true
+  position_sizing: CANONICAL_RISK_KELLY_CORRELATION_COST
+  tiny_canary_cap: false
