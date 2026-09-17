@@ -823,6 +823,7 @@ class MultiMarketRLTrainer:
                 markets,
                 policy=mtf_policy,
                 concurrency=4,
+                historical=True,
             )
             frames, feature_tables, mtf_audit = (
                 build_multitimeframe_feature_tables(

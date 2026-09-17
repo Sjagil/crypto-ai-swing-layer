@@ -564,6 +564,7 @@ class HPOService:
                 selected,
                 policy=mtf_policy,
                 concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+                historical=True,
             )
             frames, feature_tables_override, mtf_audit = (
                 build_multitimeframe_feature_tables(
@@ -810,6 +811,7 @@ class HPOService:
                 selected,
                 policy=mtf_policy,
                 concurrency=int(self.cfg.get("fetch_concurrency", 4)),
+                historical=True,
             )
             frames, feature_tables, mtf_audit = (
                 build_multitimeframe_feature_tables(

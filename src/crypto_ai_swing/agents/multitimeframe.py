@@ -132,6 +132,7 @@ def fetch_multitimeframe_frames(
     *,
     policy: MTFFusionPolicy,
     concurrency: int = 4,
+    historical: bool = False,
 ) -> dict[str, dict[str, pd.DataFrame]]:
     output: dict[str, dict[str, pd.DataFrame]] = {}
     for timeframe in (
@@ -139,12 +140,27 @@ def fetch_multitimeframe_frames(
         *policy.required_context_timeframes,
         *policy.optional_context_timeframes,
     ):
-        raw = bridge.ohlcv_many(
-            list(markets),
-            timeframe,
-            persist=False,
-            concurrency=int(concurrency),
-        )
+        if historical:
+            loader = getattr(
+                bridge, "historical_ohlcv_many", None
+            )
+            if not callable(loader):
+                raise RuntimeError(
+                    "historical MTF requested but bridge has no "
+                    "historical_ohlcv_many()"
+                )
+            raw = loader(
+                list(markets),
+                timeframe,
+                provider="bitvavo",
+            )
+        else:
+            raw = bridge.ohlcv_many(
+                list(markets),
+                timeframe,
+                persist=False,
+                concurrency=int(concurrency),
+            )
         output[str(timeframe)] = {
             str(market).upper(): frame
             for market, frame in raw.items()
@@ -620,8 +636,18 @@ def build_multitimeframe_feature_tables(
 
     eligible = sorted(feature_tables)
     if training and len(eligible) < policy.minimum_training_markets:
+        reason_counts: dict[str, int] = {}
+        for row in market_audit.values():
+            if bool(row.get("training_eligible")):
+                continue
+            reason = str(row.get("reason") or "UNKNOWN")
+            reason_counts[reason] = (
+                reason_counts.get(reason, 0) + 1
+            )
         raise ValueError(
-            f"MTF training markets {len(eligible)} < {policy.minimum_training_markets}"
+            f"MTF training markets {len(eligible)} "
+            f"< {policy.minimum_training_markets}; "
+            f"excluded={json.dumps(reason_counts, sort_keys=True)}"
         )
     audit = {
         "version": MTF_FUSION_VERSION,

@@ -98,7 +98,7 @@ class _RemoteExecutionClient:
             f"POST\n"
             f"{path}\n"
             f"{body_hash}"
-        ).encode("utf-8")
+        ).encode()
 
         signature = hmac.new(
             self.secret,
@@ -140,10 +140,8 @@ class _RemoteExecutionClient:
                 }
 
             raise RuntimeError(
-                (
-                    f"REMOTE_EXECUTOR_HTTP_{exc.code}: "
-                    f"{json.dumps(detail, default=str)[:1000]}"
-                )
+                f"REMOTE_EXECUTOR_HTTP_{exc.code}: "
+                f"{json.dumps(detail, default=str)[:1000]}"
             ) from exc
 
         except urllib.error.URLError as exc:
@@ -157,7 +155,7 @@ class _RemoteExecutionClient:
         )
 
         if not isinstance(value, dict):
-            raise RuntimeError(
+            raise TypeError(
                 "REMOTE_EXECUTOR_INVALID_RESPONSE"
             )
 
@@ -543,12 +541,10 @@ class CryptoAuthorityAdapter:
     ) -> dict[str, Any]:
         if self.remote:
             raise PermissionError(
-                (
-                    "Remote live approval is "
-                    "intentionally disabled. "
-                    "Approve authority locally "
-                    "on the home execution host."
-                )
+                "Remote live approval is "
+                "intentionally disabled. "
+                "Approve authority locally "
+                "on the home execution host."
             )
 
         return (

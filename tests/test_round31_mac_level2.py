@@ -12,11 +12,11 @@ def test_level2_swing_canary_is_configured_but_not_automatic() -> None:
         (ROOT / "config" / "execution.yaml").read_text(encoding="utf-8")
     )
     canary = config["swing_canary"]
-    assert canary["maximum_order_eur"] == 25
-    assert canary["maximum_total_exposure_eur"] == 75
-    assert canary["maximum_positions"] == 3
-    assert canary["maximum_new_orders_per_day"] == 3
-    assert canary["maximum_risk_per_trade_eur"] == 2
+    assert canary["maximum_order_eur"] == 10
+    assert canary["maximum_total_exposure_eur"] == 10
+    assert canary["maximum_positions"] == 1
+    assert canary["maximum_new_orders_per_day"] == 1
+    assert canary["maximum_risk_per_trade_eur"] == 1
     assert canary["autoscale"] is False
     assert canary["automatic_authority"] is False
 
@@ -29,7 +29,7 @@ def test_proactive_execution_validation_uses_level2_order_cap() -> None:
     assert policy["maximum_order_eur"] == 10.0
     assert policy["manual_authority_required"] is True
     assert policy["prospective_evidence_required_for_scaling"] is True
-    assert policy["autoscale"] is True
+    assert policy["autoscale"] is False
 
 
 def test_optuna_reference_worker_is_pinned_to_major_four() -> None:
