@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+
 class TCNGRURuntime:
     """Hot-reloading runtime for the evidence-qualified TCN+GRU champion."""
 
