@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import os
 import sys
 import time
 
@@ -510,10 +511,21 @@ class CryptoLibraryBridge:
         settings = self.settings()
         market = str(market).upper()
         timeframe = self._historical_timeframe(timeframe)
-        processed = Path(settings.paths.processed_data_dir)
+
+        historical_root = os.getenv(
+            "CRYPTO_SWING_HISTORICAL_DATA_ROOT",
+            "",
+        ).strip()
+
+        processed = (
+            Path(historical_root).expanduser().resolve()
+            if historical_root
+            else Path(settings.paths.processed_data_dir)
+        )
+
         candidates = (
-            processed / str(provider).lower() / market / f"{timeframe}.parquet",
             processed / f"{market}_{timeframe}.parquet",
+            processed / str(provider).lower() / market / f"{timeframe}.parquet",
         )
         for candidate in candidates:
             if candidate.is_file():
