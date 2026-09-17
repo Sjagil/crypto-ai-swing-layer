@@ -15,6 +15,11 @@ from sklearn.covariance import LedoitWolf
 from crypto_ai_swing.agents.component_features import (
     extract_components,
     extract_descriptors,
+    extract_research_component,
+)
+from crypto_ai_swing.agents.crypto_repo_signals import (
+    PROSPECTIVE_CONTEXT_FEATURES,
+    prospective_context_feature_vector,
 )
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.research.performance_attribution import (
@@ -32,6 +37,7 @@ BASE_FEATURES = (
     "tf_1d",
     "tf_1w",
     "technical",
+    "alpha",
     "mtf",
     "risk",
     "execution",
@@ -47,6 +53,9 @@ BASE_FEATURES = (
     "h1_rsi_centered",
     "m15_rsi_centered",
 )
+
+
+BASE_FEATURES = tuple(dict.fromkeys((*BASE_FEATURES, *PROSPECTIVE_CONTEXT_FEATURES)))
 
 
 def _now() -> str:
@@ -206,6 +215,10 @@ def _candidate_states(context: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
 def feature_vector(context: Mapping[str, Any]) -> dict[str, float | None]:
     components = extract_components(context)
+    research_alpha = extract_research_component(
+        context,
+        "alpha",
+    )
     desc = extract_descriptors(context)
     states = _candidate_states(context) or {}
     result: dict[str, float | None] = {}
@@ -214,6 +227,11 @@ def feature_vector(context: Mapping[str, Any]) -> dict[str, float | None]:
         result[f"tf_{tf}"] = _state_score(state) if isinstance(state, Mapping) else None
     for name in ("technical", "mtf", "risk", "execution", "cmc", "nlp", "orderflow"):
         result[name] = _f(components.get(name), None)
+
+    result["alpha"] = _f(
+        research_alpha,
+        None,
+    )
     for source, target in (
         ("mtf_alignment", "mtf_alignment"),
         ("mtf_macro", "mtf_macro"),
@@ -227,6 +245,7 @@ def feature_vector(context: Mapping[str, Any]) -> dict[str, float | None]:
     m15 = _f(desc.get("m15_rsi"), None)
     result["h1_rsi_centered"] = (h1 - 50.0) / 50.0 if h1 is not None else None
     result["m15_rsi_centered"] = (m15 - 50.0) / 50.0 if m15 is not None else None
+    result.update(prospective_context_feature_vector(context))
     return result
 
 

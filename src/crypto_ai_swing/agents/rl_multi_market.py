@@ -8,20 +8,77 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from crypto_ai_swing.agents.dataset import DEFAULT_FEATURES
+from crypto_ai_swing.agents.canonical_features import (
+    canonical_model_frame,
+    select_train_only_features,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
-from crypto_ai_swing.data.features import build_features
+from crypto_ai_swing.agents.hpo import HPOModelFactory
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_multitimeframe_feature_tables,
+    fetch_multitimeframe_frames,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+    timeframe_seconds,
+    validate_selected_mtf_features,
+)
 
 
 CANDIDATE_SEEDS = (17, 29, 43)
 
+RL_STATE_VERSION = "round47h_final_mtf_position_state_v2"
+RL_STATE_FEATURES = (
+    "position",
+    "hold_progress",
+    "cooldown_progress",
+    "trade_return",
+    "trade_runup",
+    "trade_giveback",
+    "portfolio_drawdown",
+)
 
-def _prepare(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    features = (
-        build_features(frame)
-        .replace([np.inf, -np.inf], np.nan)
-        .loc[:, list(DEFAULT_FEATURES)]
+
+def _prepare(
+    bridge: CryptoLibraryBridge,
+    market: str,
+    frame: pd.DataFrame,
+    *,
+    feature_frame: pd.DataFrame | None = None,
+    timeframe: str | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    selected_timeframe = str(
+        timeframe or frame.attrs.get("timeframe") or "1h"
     )
+    features = (
+        feature_frame.copy()
+        if feature_frame is not None
+        else canonical_model_frame(
+            bridge,
+            frame,
+            market=market,
+            timeframe=selected_timeframe,
+            benchmark=None,
+        )
+    ).replace([np.inf, -np.inf], np.nan)
+
+    operational = [
+        name
+        for name in features.columns
+        if str(name).lower().endswith(
+            ("__age_bars", "__present", "__source_close_ns")
+        )
+    ]
+    if operational:
+        features = features.drop(columns=operational)
+
+    for name in features.columns:
+        if pd.api.types.is_numeric_dtype(features[name]):
+            features[name] = pd.to_numeric(
+                features[name], errors="coerce"
+            ).astype(np.float32, copy=False)
+
     next_return = (
         pd.to_numeric(frame["close"], errors="coerce")
         .pct_change()
@@ -30,8 +87,19 @@ def _prepare(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     )
     joined = features.copy()
     joined["__next_return"] = next_return
-    joined = joined.dropna()
-    return joined.loc[:, list(DEFAULT_FEATURES)], joined["__next_return"]
+    joined = joined.dropna(subset=["__next_return"])
+    return (
+        joined.drop(columns=["__next_return"]).copy(),
+        joined["__next_return"].astype(np.float32, copy=False),
+    )
+
+
+def _environment_kwargs(timeframe: str) -> dict[str, int]:
+    hours_per_bar = timeframe_seconds(str(timeframe)) / 3600.0
+    return {
+        "minimum_hold_bars": max(1, int(round(6.0 / hours_per_bar))),
+        "cooldown_bars": max(0, int(round(2.0 / hours_per_bar))),
+    }
 
 
 def _normalize(
@@ -45,7 +113,14 @@ def _normalize(
     ).clip(-10.0, 10.0).replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
 
-def _env(feature_frame: pd.DataFrame, returns: pd.Series, *, extra_stress_bps: float = 0.0):
+def _env(
+    feature_frame: pd.DataFrame,
+    returns: pd.Series,
+    *,
+    extra_stress_bps: float = 0.0,
+    minimum_hold_bars: int = 6,
+    cooldown_bars: int = 2,
+):
     import gymnasium as gym
     from gymnasium import spaces
 
@@ -53,6 +128,8 @@ def _env(feature_frame: pd.DataFrame, returns: pd.Series, *, extra_stress_bps: f
     r = returns.to_numpy(np.float32)
     normal_turnover_cost = 35.0 / 10_000.0
     extra = float(extra_stress_bps) / 10_000.0
+    min_hold = max(1, int(minimum_hold_bars))
+    cooldown = max(0, int(cooldown_bars))
 
     class LongOnlyEnv(gym.Env):
         metadata = {"render_modes": []}
@@ -63,18 +140,67 @@ def _env(feature_frame: pd.DataFrame, returns: pd.Series, *, extra_stress_bps: f
             self.observation_space = spaces.Box(
                 -np.inf,
                 np.inf,
-                shape=(x.shape[1] + 2,),
+                shape=(x.shape[1] + len(RL_STATE_FEATURES),),
                 dtype=np.float32,
             )
             self.i = 0
             self.position = 0.0
             self.equity = 1.0
             self.peak = 1.0
+            self.previous_drawdown = 0.0
+            self.bars_in_position = 0
+            self.cooldown_remaining = 0
+            self.trade_value = 1.0
+            self.trade_peak = 1.0
+            self.trade_return = 0.0
+            self.trade_runup = 0.0
+            self.trade_giveback = 0.0
+            self.previous_trade_giveback = 0.0
+
+        def _state_vector(self) -> np.ndarray:
+            drawdown = max(
+                0.0,
+                1.0
+                - self.equity
+                / max(self.peak, 1e-9),
+            )
+            hold_progress = (
+                min(
+                    1.0,
+                    float(self.bars_in_position)
+                    / float(min_hold),
+                )
+                if self.position > 0.0
+                else 0.0
+            )
+            cooldown_progress = (
+                min(
+                    1.0,
+                    float(self.cooldown_remaining)
+                    / float(max(1, cooldown)),
+                )
+                if cooldown > 0
+                else 0.0
+            )
+            return np.asarray(
+                [
+                    self.position,
+                    hold_progress,
+                    cooldown_progress,
+                    float(np.clip(self.trade_return, -1.0, 1.0)),
+                    float(np.clip(self.trade_runup, 0.0, 1.0)),
+                    float(np.clip(self.trade_giveback, 0.0, 1.0)),
+                    float(np.clip(drawdown, 0.0, 1.0)),
+                ],
+                dtype=np.float32,
+            )
 
         def _obs(self):
-            dd = self.equity / max(self.peak, 1e-9) - 1.0
             return np.concatenate(
-                [x[self.i], np.asarray([self.position, dd], np.float32)]
+                [
+                    x[self.i],
+                    self._state_vector(),
+                ]
             ).astype(np.float32)
 
         def reset(self, *, seed=None, options=None):
@@ -83,71 +209,473 @@ def _env(feature_frame: pd.DataFrame, returns: pd.Series, *, extra_stress_bps: f
             self.position = 0.0
             self.equity = 1.0
             self.peak = 1.0
+            self.previous_drawdown = 0.0
+            self.bars_in_position = 0
+            self.cooldown_remaining = 0
+            self.trade_value = 1.0
+            self.trade_peak = 1.0
+            self.trade_return = 0.0
+            self.trade_runup = 0.0
+            self.trade_giveback = 0.0
+            self.previous_trade_giveback = 0.0
             return self._obs(), {}
 
         def step(self, action):
-            target = 1.0 if int(action) == 1 else 0.0
-            turnover = abs(target - self.position)
-            gross = target * float(r[self.i])
-            normal_cost = turnover * normal_turnover_cost
-            stress_cost = turnover * extra
-            net = gross - normal_cost - stress_cost
-            self.equity *= max(1e-8, 1.0 + net)
-            self.peak = max(self.peak, self.equity)
-            drawdown = max(0.0, 1.0 - self.equity / max(self.peak, 1e-9))
-            # Reward favors net return but penalizes persistent drawdown and churn.
-            reward = net - 0.15 * drawdown - 0.10 * turnover * normal_turnover_cost
+            requested = (
+                1.0
+                if int(action) == 1
+                else 0.0
+            )
+            target = requested
+
+            if (
+                self.position > 0.0
+                and target <= 0.0
+                and self.bars_in_position < min_hold
+            ):
+                target = 1.0
+
+            if (
+                self.position <= 0.0
+                and target > 0.0
+                and self.cooldown_remaining > 0
+            ):
+                target = 0.0
+
+            invalid_action = bool(
+                requested != target
+            )
+            old_position = self.position
+            old_bars = self.bars_in_position
+
+            turnover = abs(
+                target - old_position
+            )
+            gross = (
+                target
+                * float(r[self.i])
+            )
+            normal_cost = (
+                turnover
+                * normal_turnover_cost
+            )
+            stress_cost = (
+                turnover
+                * extra
+            )
+            net = (
+                gross
+                - normal_cost
+                - stress_cost
+            )
+
+            closed_trade_return = None
+            closed_trade_hold_bars = None
+
+            if target > 0.0:
+                if old_position <= 0.0:
+                    self.trade_value = max(
+                        1e-8,
+                        1.0 + net,
+                    )
+                    self.trade_peak = max(
+                        1.0,
+                        self.trade_value,
+                    )
+                    self.previous_trade_giveback = 0.0
+                else:
+                    self.trade_value *= max(
+                        1e-8,
+                        1.0 + gross,
+                    )
+                    self.trade_peak = max(
+                        self.trade_peak,
+                        self.trade_value,
+                    )
+
+                self.trade_return = (
+                    self.trade_value
+                    - 1.0
+                )
+                self.trade_runup = max(
+                    0.0,
+                    self.trade_peak
+                    - 1.0,
+                )
+                self.trade_giveback = max(
+                    0.0,
+                    (
+                        self.trade_peak
+                        - self.trade_value
+                    )
+                    / max(
+                        self.trade_peak,
+                        1e-9,
+                    ),
+                )
+            elif old_position > 0.0:
+                final_trade_value = (
+                    self.trade_value
+                    * max(
+                        1e-8,
+                        1.0
+                        - normal_cost
+                        - stress_cost,
+                    )
+                )
+                closed_trade_return = float(
+                    final_trade_value
+                    - 1.0
+                )
+                closed_trade_hold_bars = int(
+                    old_bars
+                )
+
+            giveback_increase = max(
+                0.0,
+                self.trade_giveback
+                - self.previous_trade_giveback,
+            )
+
+            self.equity *= max(
+                1e-8,
+                1.0 + net,
+            )
+            self.peak = max(
+                self.peak,
+                self.equity,
+            )
+            drawdown = max(
+                0.0,
+                1.0
+                - self.equity
+                / max(self.peak, 1e-9),
+            )
+            drawdown_increase = max(
+                0.0,
+                drawdown
+                - self.previous_drawdown,
+            )
+
+            reward = (
+                np.log(
+                    max(
+                        1e-8,
+                        1.0 + net,
+                    )
+                )
+                - 0.35
+                * drawdown_increase
+                - 0.10
+                * turnover
+                * normal_turnover_cost
+                - 0.10
+                * giveback_increase
+                - (
+                    0.05
+                    * normal_turnover_cost
+                    if invalid_action
+                    else 0.0
+                )
+            )
+
             self.position = target
+
+            if self.position > 0.0:
+                self.bars_in_position = (
+                    old_bars + 1
+                    if old_position > 0.0
+                    else 1
+                )
+            else:
+                if old_position > 0.0:
+                    self.cooldown_remaining = cooldown
+                elif self.cooldown_remaining > 0:
+                    self.cooldown_remaining -= 1
+
+                self.bars_in_position = 0
+                self.trade_value = 1.0
+                self.trade_peak = 1.0
+                self.trade_return = 0.0
+                self.trade_runup = 0.0
+                self.trade_giveback = 0.0
+                self.previous_trade_giveback = 0.0
+
+            if self.position > 0.0:
+                self.previous_trade_giveback = (
+                    self.trade_giveback
+                )
+
+            self.previous_drawdown = drawdown
             self.i += 1
-            done = self.i >= len(x) - 1
-            return self._obs(), float(reward), done, False, {
-                "equity": self.equity,
-                "drawdown": drawdown,
-                "net_return": net,
-                "turnover": turnover,
-            }
+            done = (
+                self.i
+                >= len(x) - 1
+            )
+
+            return (
+                self._obs(),
+                float(reward),
+                done,
+                False,
+                {
+                    "equity": self.equity,
+                    "drawdown": drawdown,
+                    "net_return": net,
+                    "turnover": turnover,
+                    "requested_action": requested,
+                    "executed_target": target,
+                    "invalid_action": invalid_action,
+                    "bars_in_position": self.bars_in_position,
+                    "cooldown_remaining": self.cooldown_remaining,
+                    "trade_return": self.trade_return,
+                    "trade_runup": self.trade_runup,
+                    "trade_giveback": self.trade_giveback,
+                    "closed_trade_return": closed_trade_return,
+                    "closed_trade_hold_bars": closed_trade_hold_bars,
+                    "state_version": RL_STATE_VERSION,
+                },
+            )
 
     return LongOnlyEnv()
 
 
-def _evaluate(model, x: pd.DataFrame, r: pd.Series, *, stress_bps: float = 0.0):
-    env = _env(x, r, extra_stress_bps=stress_bps)
+def _evaluate(
+    model,
+    x: pd.DataFrame,
+    r: pd.Series,
+    *,
+    stress_bps: float = 0.0,
+    env_kwargs: dict[str, int] | None = None,
+):
+    env = _env(
+        x,
+        r,
+        extra_stress_bps=stress_bps,
+        **dict(env_kwargs or {}),
+    )
     obs, _ = env.reset()
     done = False
     max_dd = 0.0
+    max_giveback = 0.0
     net_returns = []
     turnovers = []
+    invalid_actions = 0
+    closed_trade_returns = []
+    closed_trade_holds = []
+
     while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, _, terminated, truncated, info = env.step(action)
-        done = bool(terminated or truncated)
-        max_dd = max(max_dd, float(info.get("drawdown", 0.0)))
-        net_returns.append(float(info.get("net_return", 0.0)))
-        turnovers.append(float(info.get("turnover", 0.0)))
-    strategy = float(env.equity - 1.0)
-    buy_hold = float(np.prod(1.0 + r.iloc[:len(net_returns)].to_numpy(float)) - 1.0)
-    index = x.index[:len(net_returns)]
+        action, _ = model.predict(
+            obs,
+            deterministic=True,
+        )
+        (
+            obs,
+            _,
+            terminated,
+            truncated,
+            info,
+        ) = env.step(action)
+
+        done = bool(
+            terminated
+            or truncated
+        )
+        max_dd = max(
+            max_dd,
+            float(
+                info.get(
+                    "drawdown",
+                    0.0,
+                )
+            ),
+        )
+        max_giveback = max(
+            max_giveback,
+            float(
+                info.get(
+                    "trade_giveback",
+                    0.0,
+                )
+            ),
+        )
+        net_returns.append(
+            float(
+                info.get(
+                    "net_return",
+                    0.0,
+                )
+            )
+        )
+        turnovers.append(
+            float(
+                info.get(
+                    "turnover",
+                    0.0,
+                )
+            )
+        )
+        invalid_actions += int(
+            bool(
+                info.get(
+                    "invalid_action",
+                    False,
+                )
+            )
+        )
+
+        closed_return = info.get(
+            "closed_trade_return"
+        )
+        if closed_return is not None:
+            closed_trade_returns.append(
+                float(closed_return)
+            )
+
+        closed_hold = info.get(
+            "closed_trade_hold_bars"
+        )
+        if closed_hold is not None:
+            closed_trade_holds.append(
+                int(closed_hold)
+            )
+
+    strategy = float(
+        env.equity
+        - 1.0
+    )
+    buy_hold = float(
+        np.prod(
+            1.0
+            + r.iloc[
+                :len(net_returns)
+            ].to_numpy(float)
+        )
+        - 1.0
+    )
+    index = x.index[
+        :len(net_returns)
+    ]
+    turnover_events = int(
+        np.sum(
+            np.asarray(
+                turnovers
+            )
+            > 0
+        )
+    )
+    steps = len(
+        net_returns
+    )
+
+    closed = np.asarray(
+        closed_trade_returns,
+        dtype=float,
+    )
+
     return {
         "strategy_return": strategy,
         "buy_hold_return": buy_hold,
-        "excess_vs_buy_hold": strategy - buy_hold,
+        "excess_vs_buy_hold": (
+            strategy
+            - buy_hold
+        ),
         "maximum_drawdown": max_dd,
-        "turnover_events": int(np.sum(np.asarray(turnovers) > 0)),
-        "step_returns": pd.Series(net_returns, index=index, dtype=float),
+        "maximum_trade_giveback": max_giveback,
+        "turnover_events": turnover_events,
+        "turnover_rate": (
+            turnover_events
+            / max(
+                1,
+                steps,
+            )
+        ),
+        "invalid_action_rate": (
+            invalid_actions
+            / max(
+                1,
+                steps,
+            )
+        ),
+        "closed_trade_count": int(
+            len(closed)
+        ),
+        "mean_closed_trade_return": (
+            float(
+                np.mean(closed)
+            )
+            if len(closed)
+            else None
+        ),
+        "positive_closed_trade_fraction": (
+            float(
+                np.mean(
+                    closed > 0.0
+                )
+            )
+            if len(closed)
+            else None
+        ),
+        "mean_closed_trade_hold_bars": (
+            float(
+                np.mean(
+                    closed_trade_holds
+                )
+            )
+            if closed_trade_holds
+            else None
+        ),
+        "steps": steps,
+        "step_returns": pd.Series(
+            net_returns,
+            index=index,
+            dtype=float,
+        ),
     }
 
 
-def _metrics(model, split: dict[str, tuple[pd.DataFrame, pd.Series]]):
+def _metrics(
+    model,
+    split: dict[str, tuple[pd.DataFrame, pd.Series]],
+    *,
+    env_kwargs: dict[str, int] | None = None,
+):
     per_market = {}
     series = {}
     for market, (x, r) in sorted(split.items()):
-        result = _evaluate(model, x, r)
+        result = _evaluate(model, x, r, env_kwargs=env_kwargs)
         series[market] = result.pop("step_returns")
         per_market[market] = result
+
     returns = np.asarray([row["strategy_return"] for row in per_market.values()], dtype=float)
     excess = np.asarray([row["excess_vs_buy_hold"] for row in per_market.values()], dtype=float)
     drawdowns = np.asarray([row["maximum_drawdown"] for row in per_market.values()], dtype=float)
+    turnover_rates = np.asarray(
+        [row.get("turnover_rate", 0.0) for row in per_market.values()],
+        dtype=float,
+    )
+    invalid_action_rates = np.asarray(
+        [
+            row.get(
+                "invalid_action_rate",
+                0.0,
+            )
+            for row in per_market.values()
+        ],
+        dtype=float,
+    )
+    givebacks = np.asarray(
+        [
+            row.get(
+                "maximum_trade_giveback",
+                0.0,
+            )
+            for row in per_market.values()
+        ],
+        dtype=float,
+    )
     portfolio = pd.concat(series, axis=1).mean(axis=1).dropna() if series else pd.Series(dtype=float)
+
     return {
         "market_count": len(per_market),
         "mean_return": float(returns.mean()) if len(returns) else -1.0,
@@ -155,6 +683,17 @@ def _metrics(model, split: dict[str, tuple[pd.DataFrame, pd.Series]]):
         "positive_market_fraction": float(np.mean(returns > 0.0)) if len(returns) else 0.0,
         "mean_excess_vs_buy_hold": float(excess.mean()) if len(excess) else -1.0,
         "worst_maximum_drawdown": float(drawdowns.max()) if len(drawdowns) else 1.0,
+        "mean_turnover_rate": float(turnover_rates.mean()) if len(turnover_rates) else 1.0,
+        "mean_invalid_action_rate": (
+            float(invalid_action_rates.mean())
+            if len(invalid_action_rates)
+            else 1.0
+        ),
+        "worst_trade_giveback": (
+            float(givebacks.max())
+            if len(givebacks)
+            else 1.0
+        ),
         "per_market": per_market,
         "portfolio_step_returns": portfolio,
     }
@@ -179,6 +718,28 @@ def _bayesian_market_returns(metrics: dict[str, Any], draws: int = 5000) -> dict
         "cross_market_mean_p05": float(np.quantile(means, 0.05)),
         "cross_market_mean_p50": float(np.quantile(means, 0.50)),
         "cross_market_mean_p95": float(np.quantile(means, 0.95)),
+    }
+
+
+def _validation_viability_checks(
+    metrics: dict[str, Any],
+) -> dict[str, bool]:
+    return {
+        "market_count": int(metrics.get("market_count", 0)) >= 6,
+        "mean_return": float(metrics.get("mean_return", -1.0)) > 0.0,
+        "median_return": float(metrics.get("median_return", -1.0)) > 0.0,
+        "positive_market_fraction": (
+            float(metrics.get("positive_market_fraction", 0.0)) >= 0.50
+        ),
+        "mean_excess_vs_buy_hold": (
+            float(metrics.get("mean_excess_vs_buy_hold", -1.0)) > 0.0
+        ),
+        "maximum_drawdown": (
+            float(metrics.get("worst_maximum_drawdown", 1.0)) <= 0.25
+        ),
+        "invalid_action_rate": (
+            float(metrics.get("mean_invalid_action_rate", 0.0)) <= 0.20
+        ),
     }
 
 
@@ -234,24 +795,64 @@ class MultiMarketRLTrainer:
         self,
         *,
         markets: list[str],
-        timeframe: str = "1h",
+        timeframe: str = "15m",
         total_timesteps: int = 50_000,
-        minimum_rows_per_market: int = 900,
+        minimum_rows_per_market: int = 8_000,
     ) -> dict[str, Any]:
         from stable_baselines3 import PPO
         from stable_baselines3.common.vec_env import DummyVecEnv
 
-        frames = self.crypto.ohlcv_many(
-            markets,
-            timeframe,
-            persist=False,
-            concurrency=4,
+        mtf_policy = resolve_mtf_policy(
+            dict(
+                (getattr(self.settings, "agents", {}) or {}).get(
+                    "multitimeframe", {}
+                )
+                or {}
+            )
         )
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        feature_tables = {}
+        mtf_audit = {"enabled": False}
+
+        if mtf_enabled:
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                markets,
+                policy=mtf_policy,
+                concurrency=4,
+                historical=True,
+            )
+            frames, feature_tables, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+        else:
+            frames = self.crypto.ohlcv_many(
+                markets,
+                timeframe,
+                persist=False,
+                concurrency=4,
+            )
+
         raw = {}
         for market, frame in frames.items():
             if frame is None or frame.empty:
                 continue
-            x, r = _prepare(frame)
+            x, r = _prepare(
+                self.crypto,
+                market,
+                frame,
+                feature_frame=feature_tables.get(market),
+                timeframe=timeframe,
+            )
             if len(x) >= minimum_rows_per_market:
                 raw[market] = (x, r)
 
@@ -267,19 +868,73 @@ class MultiMarketRLTrainer:
             validation_end = int(n * 0.80)
             if train_end < 400 or validation_end - train_end < 150 or n - validation_end < 150:
                 continue
-            train_raw[market] = (x.iloc[:train_end].copy(), r.iloc[:train_end].copy())
+            train_raw[market] = (
+                x.iloc[: max(1, train_end - 1)].copy(),
+                r.iloc[: max(1, train_end - 1)].copy(),
+            )
             validation_raw[market] = (
-                x.iloc[train_end:validation_end].copy(),
-                r.iloc[train_end:validation_end].copy(),
+                x.iloc[train_end + 1 : max(train_end + 2, validation_end - 1)].copy(),
+                r.iloc[train_end + 1 : max(train_end + 2, validation_end - 1)].copy(),
             )
             test_raw[market] = (
-                x.iloc[validation_end:].copy(),
-                r.iloc[validation_end:].copy(),
+                x.iloc[validation_end + 1 :].copy(),
+                r.iloc[validation_end + 1 :].copy(),
             )
 
         if len(train_raw) < 6:
             raise ValueError(f"RL split-usable markets {len(train_raw)} < 6")
 
+        selection_blocks = []
+        for market in sorted(train_raw):
+            x, r = train_raw[market]
+            block = x.copy()
+            block["__round47f_target"] = pd.to_numeric(
+                r.reindex(x.index),
+                errors="coerce",
+            )
+            selection_blocks.append(block)
+
+        selection_frame = pd.concat(
+            selection_blocks,
+            axis=0,
+            sort=False,
+        ).sort_index(kind="stable")
+        train_target_full = selection_frame.pop(
+            "__round47f_target"
+        )
+        train_matrix_full = selection_frame
+        selected_features = select_train_only_features(
+            train_matrix_full,
+            tuple(train_matrix_full.columns),
+            target=train_target_full,
+            maximum_features=int(
+                (self.settings.agents.get("hpo", {}) or {}).get(
+                    "rl_maximum_features", 80
+                )
+            ),
+        )
+        if mtf_enabled:
+            mtf_selected_groups = validate_selected_mtf_features(
+                selected_features,
+                policy=mtf_policy,
+            )
+        else:
+            mtf_selected_groups = {}
+
+        if len(selected_features) < 8:
+            raise ValueError(
+                f"RL canonical train-only feature selection left {len(selected_features)} features"
+            )
+
+        def align(split):
+            return {
+                market: (x.reindex(columns=list(selected_features)), r.copy())
+                for market, (x, r) in split.items()
+            }
+
+        train_raw = align(train_raw)
+        validation_raw = align(validation_raw)
+        test_raw = align(test_raw)
         train_matrix = pd.concat([x for x, _ in train_raw.values()], axis=0)
         feature_mean = train_matrix.mean(axis=0)
         feature_std = train_matrix.std(axis=0, ddof=0).replace(0.0, 1.0)
@@ -294,9 +949,20 @@ class MultiMarketRLTrainer:
         validation = norm_split(validation_raw)
         test = norm_split(test_raw)
 
+        env_kwargs = _environment_kwargs(timeframe)
+
         per_candidate_timesteps = max(
             10_000,
             int(total_timesteps) // len(CANDIDATE_SEEDS),
+        )
+        hpo_params = HPOModelFactory(
+            self.settings,
+            timeframe=timeframe,
+            horizon_bars=1,
+        ).rl_params(
+            timeframe=timeframe,
+            mtf_version=(MTF_FUSION_VERSION if mtf_enabled else None),
+            feature_columns=selected_features,
         )
         candidate_rows = []
         candidate_models = {}
@@ -305,31 +971,44 @@ class MultiMarketRLTrainer:
             for market in sorted(train):
                 x, r = train[market]
                 factories.append(
-                    lambda x=x.copy(), r=r.copy(): _env(x, r)
+                    lambda x=x.copy(), r=r.copy(): _env(
+                        x, r, **env_kwargs
+                    )
                 )
             vector_env = DummyVecEnv(factories)
+            architecture = {
+                "64x64": [64, 64],
+                "128x64": [128, 64],
+                "128x128": [128, 128],
+            }.get(str(hpo_params.get("net_arch", "64x64")), [64, 64])
             model = PPO(
                 "MlpPolicy",
                 vector_env,
-                learning_rate=2.5e-4,
-                n_steps=512,
-                batch_size=128,
-                gamma=0.995,
-                gae_lambda=0.95,
-                ent_coef=0.003,
-                vf_coef=0.5,
+                policy_kwargs={"net_arch": architecture},
+                learning_rate=float(hpo_params.get("learning_rate", 2.5e-4)),
+                n_steps=int(hpo_params.get("n_steps", 512)),
+                batch_size=int(hpo_params.get("batch_size", 128)),
+                gamma=float(hpo_params.get("gamma", 0.995)),
+                gae_lambda=float(hpo_params.get("gae_lambda", 0.95)),
+                ent_coef=float(hpo_params.get("ent_coef", 0.003)),
+                vf_coef=float(hpo_params.get("vf_coef", 0.5)),
+                clip_range=float(hpo_params.get("clip_range", 0.2)),
+                n_epochs=int(hpo_params.get("n_epochs", 10)),
                 max_grad_norm=0.5,
                 seed=seed,
                 verbose=0,
             )
             model.learn(total_timesteps=per_candidate_timesteps)
-            metrics = _metrics(model, validation)
+            metrics = _metrics(model, validation, env_kwargs=env_kwargs)
             portfolio = metrics.pop("portfolio_step_returns")
             objective = (
                 metrics["mean_return"]
                 + 0.35 * metrics["mean_excess_vs_buy_hold"]
                 + 0.20 * metrics["median_return"]
                 - 0.50 * metrics["worst_maximum_drawdown"]
+                - 0.20 * metrics.get("mean_turnover_rate", 0.0)
+                - 0.10 * metrics.get("mean_invalid_action_rate", 0.0)
+                - 0.10 * metrics.get("worst_trade_giveback", 0.0)
             )
             candidate_rows.append(
                 {
@@ -341,18 +1020,79 @@ class MultiMarketRLTrainer:
             )
             candidate_models[seed] = model
 
-        selected = max(candidate_rows, key=lambda row: row["objective"])
+        for row in candidate_rows:
+            viability = _validation_viability_checks(
+                dict(row.get("metrics") or {})
+            )
+            row["validation_viability_checks"] = viability
+            row["validation_viable"] = all(
+                viability.values()
+            )
+
+        viable_rows = [
+            row
+            for row in candidate_rows
+            if bool(row.get("validation_viable"))
+        ]
+
+        if not viable_rows:
+            root = (
+                self.settings.project_root
+                / "output/crypto_ai_swing/agents/rl"
+            )
+            root.mkdir(parents=True, exist_ok=True)
+            trained_at = datetime.now(UTC)
+            rejection = {
+                "schema_version": "swing_rl_validation_rejection_v1",
+                "status": "SHADOW_REJECTED_VALIDATION",
+                "trained_at": trained_at.isoformat(),
+                "algorithm": "PPO",
+                "markets": sorted(train),
+                "timeframe": timeframe,
+                "candidate_seeds": list(CANDIDATE_SEEDS),
+                "candidate_validation": candidate_rows,
+                "selected_seed": None,
+                "feature_columns": list(selected_features),
+                "observation_state_version": RL_STATE_VERSION,
+                "qualified": False,
+                "live_decision_influence": False,
+                "automatic_live_promotion": False,
+                "final_test_touched": False,
+                "final_test_used_for_model_selection": False,
+                "orders_submitted": 0,
+            }
+            (
+                root
+                / "validation_rejection_latest.json"
+            ).write_text(
+                json.dumps(
+                    rejection,
+                    indent=2,
+                    sort_keys=True,
+                    default=str,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return rejection
+
+        selected = max(
+            viable_rows,
+            key=lambda row: row["objective"],
+        )
         selected_seed = int(selected["seed"])
         model = candidate_models[selected_seed]
 
-        test_metrics = _metrics(model, test)
+        test_metrics = _metrics(model, test, env_kwargs=env_kwargs)
         normal_portfolio = test_metrics.pop("portfolio_step_returns")
 
         # Stress the selected final-test policy with an extra 25 bps per
         # turnover event, without re-selecting the model.
         stressed_series = {}
         for market, (x, r) in test.items():
-            stressed = _evaluate(model, x, r, stress_bps=25.0)
+            stressed = _evaluate(
+                model, x, r, stress_bps=25.0, env_kwargs=env_kwargs
+            )
             stressed_series[market] = stressed.pop("step_returns")
         stressed_portfolio = (
             pd.concat(stressed_series, axis=1).mean(axis=1).dropna()
@@ -386,6 +1126,7 @@ class MultiMarketRLTrainer:
                     "validation": selected,
                     "test": test_metrics,
                     "qualified": qualified,
+                    "observation_state_version": RL_STATE_VERSION,
                 },
                 sort_keys=True,
                 default=str,
@@ -406,7 +1147,24 @@ class MultiMarketRLTrainer:
             "candidate_seeds": list(CANDIDATE_SEEDS),
             "candidate_validation": candidate_rows,
             "selected_seed": selected_seed,
-            "feature_columns": list(DEFAULT_FEATURES),
+            "feature_columns": list(selected_features),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled
+                else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe_selected_groups": mtf_selected_groups,
+            "multitimeframe_audit": mtf_audit,
+            "environment_timing": env_kwargs,
+            "observation_state_version": RL_STATE_VERSION,
+            "observation_state_features": list(RL_STATE_FEATURES),
+            "runtime_state_mode": "FLAT_ENTRY_ADVISORY_ONLY",
+            "position_manager_live_ready": False,
             "feature_mean": {
                 key: float(value)
                 for key, value in feature_mean.items()

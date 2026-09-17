@@ -14,11 +14,12 @@ def run_json(root: Path, python: str, args: list[str]) -> dict:
         env=os.environ.copy(),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
     if proc.returncode != 0:
         raise SystemExit(
-            f"{' '.join(args)} failed with code {proc.returncode}:\n{proc.stderr[-2000:]}"
+            f"{' '.join(args)} failed with code {proc.returncode}:\n"
+            f"{proc.stderr[-2000:]}"
         )
     text = proc.stdout.strip()
     try:
@@ -35,9 +36,15 @@ def main() -> int:
         "CRYPTO_SWING_PYTHON",
         str(root / ".venv" / "bin" / "python"),
     )
-    evidence = run_json(root, python, ["edge-calibration-status"])
-    readiness = dict(evidence.get("readiness") or {})
-    canary = run_json(root, python, ["live-canary-preflight"])
+
+    live = run_json(root, python, ["live-preflight"])
+    mode = run_json(root, python, ["mode-preflight", "--target", "canary"])
+    state = run_json(root, python, ["mode-status"])
+
+    # mode-preflight is the authoritative source for both
+    # prospective evidence and canonical live-canary readiness.
+    readiness = dict(mode.get("prospective_readiness") or {})
+    canary = dict(mode.get("live_gate") or {})
 
     failures: list[str] = []
     if readiness.get("eligible") is not True:
@@ -51,6 +58,24 @@ def main() -> int:
             for x in canary.get("blockers") or [canary.get("status") or "NOT_READY"]
         )
 
+    if live.get("ready") is not True:
+        failures.extend(
+            f"LIVE:{value}"
+            for value in live.get("blockers") or ["NOT_READY"]
+        )
+
+    if mode.get("ready") is not True:
+        failures.extend(
+            f"MODE:{value}"
+            for value in mode.get("blockers") or ["NOT_READY"]
+        )
+
+    if str(state.get("selected_mode") or "").lower() != "canary":
+        failures.append("MODE:PERSISTENT_CANARY_NOT_SELECTED")
+
+    if str(state.get("runtime_mode") or "").lower() != "live":
+        failures.append("MODE:PERSISTENT_RUNTIME_NOT_LIVE")
+
     if os.environ.get("CRYPTO_SWING_CANARY_EXECUTE") != "YES":
         failures.append("EXECUTION_ENV:CRYPTO_SWING_CANARY_EXECUTE_NOT_YES")
 
@@ -58,8 +83,14 @@ def main() -> int:
         "ready": not failures,
         "mode": "live",
         "failures": failures,
-        "prospective_readiness": readiness,
-        "canary_preflight": canary,
+        "live_preflight": live,
+        "mode_preflight": mode,
+        "mode_state": state,
+        "prospective_readiness": mode.get("prospective_readiness"),
+        "canary_scope": mode.get("canary_scope"),
+        "execution_validation_override_applied": mode.get(
+            "execution_validation_canary_override_applied"
+        ),
         "orders_submitted": 0,
     }
     print(json.dumps(payload, indent=2, default=str))

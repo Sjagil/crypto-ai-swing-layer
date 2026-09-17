@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,41 +10,75 @@ import numpy as np
 import pandas as pd
 
 from crypto_ai_swing.agents.council import AgentCouncilDecision, build_council_decision
-from crypto_ai_swing.data.features import build_features
+from crypto_ai_swing.agents.canonical_features import canonical_model_frame
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    build_runtime_mtf_feature_frame,
+    resolve_mtf_policy,
+)
+from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
+from crypto_ai_swing.data.features import build_features as legacy_build_features
 
 
 class AgentRuntime:
     def __init__(self, settings, *, mode: str = "shadow") -> None:
         self.settings = settings
         self.mode = str(mode).lower()
+        self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
         self.root = settings.project_root / "output/crypto_ai_swing/agents"
-        self.pointer = self.root / "latest.pointer.json"
+        self.candidate_pointer = self.root / "latest.pointer.json"
+        self.live_pointer = self.root / "live.pointer.json"
+        self.previous_live_pointer = self.root / "live.previous.pointer.json"
+        self._pointer_path: Path | None = None
         self._mtime: float | None = None
         self._bundle: dict[str, Any] | None = None
         self._error: str | None = None
 
+    def _pointers(self) -> list[Path]:
+        if self.mode == "live":
+            return [
+                self.live_pointer,
+                self.previous_live_pointer,
+                self.candidate_pointer,
+            ]
+        return [self.candidate_pointer]
+
     def _load(self) -> dict[str, Any] | None:
-        if not self.pointer.is_file():
+        selected = next((p for p in self._pointers() if p.is_file()), None)
+        if selected is None:
             self._bundle = None
             self._error = None
+            self._pointer_path = None
             return None
-        mtime = self.pointer.stat().st_mtime
-        if self._bundle is not None and self._mtime == mtime:
+        if (
+            self._bundle is not None
+            and self._mtime == selected.stat().st_mtime
+            and self._pointer_path == selected
+        ):
             return self._bundle
-        try:
-            pointer = json.loads(self.pointer.read_text(encoding="utf-8"))
-            artifact = Path(str(pointer["artifact_path"]))
-            bundle = joblib.load(artifact)
-            if not isinstance(bundle, dict):
-                raise ValueError("agent artifact is not a dict")
-            self._bundle = bundle
-            self._error = None
-            self._mtime = mtime
-        except Exception as exc:
-            self._bundle = None
-            self._error = f"{type(exc).__name__}: {str(exc)[:300]}"
-            self._mtime = mtime
-        return self._bundle
+
+        last_error = None
+        for pointer_path in self._pointers():
+            if not pointer_path.is_file():
+                continue
+            try:
+                pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+                bundle = joblib.load(Path(str(pointer["artifact_path"])))
+                if not isinstance(bundle, dict):
+                    raise ValueError("agent artifact is not a dict")
+                self._bundle = bundle
+                self._error = None
+                self._mtime = pointer_path.stat().st_mtime
+                self._pointer_path = pointer_path
+                return bundle
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+        self._bundle = None
+        self._error = last_error
+        self._pointer_path = selected
+        self._mtime = selected.stat().st_mtime
+        return None
 
     def status(self) -> dict[str, Any]:
         bundle = self._load()
@@ -52,7 +86,7 @@ class AgentRuntime:
             return {
                 "status": "NOT_TRAINED" if self._error is None else "ERROR",
                 "error": self._error,
-                "pointer": str(self.pointer),
+                "pointer": str(self._pointer_path or self.candidate_pointer),
                 "shadow_decision_qualified": False,
                 "head_qualifications": {},
                 "live_decision_influence": False,
@@ -75,8 +109,19 @@ class AgentRuntime:
                 "alpha_calibration_method",
                 "global_known_trial_count",
                 "live_decision_influence",
+                "automatic_live_promotion",
+                "promoted_at",
+                "promotion_score",
+                "promotion_scope",
             )
-        } | {"automatic_live_promotion": False}
+        } | {
+            "pointer": str(self._pointer_path or self.candidate_pointer),
+            "live_pointer_selected": (
+                self.mode == "live"
+                and self._pointer_path
+                in {self.live_pointer, self.previous_live_pointer}
+            ),
+        }
 
     def predict_frame(
         self,
@@ -111,10 +156,58 @@ class AgentRuntime:
                     shadow_decision_qualified=False,
                     head_qualifications={},
                 )
+
         features = tuple(bundle.get("feature_columns") or ())
-        feat = build_features(frame).replace([np.inf, -np.inf], np.nan)
-        feat = feat.dropna(subset=list(features))
-        if feat.empty:
+        feature_source = str(bundle.get("feature_source") or "")
+        if feature_source == MTF_FEATURE_SOURCE:
+            try:
+                mtf_policy = resolve_mtf_policy(
+                    dict(
+                        (getattr(self.settings, "agents", {}) or {}).get(
+                            "multitimeframe", {}
+                        )
+                        or {}
+                    )
+                )
+                feat, mtf_runtime_audit = build_runtime_mtf_feature_frame(
+                    self.crypto,
+                    market=str(market).upper(),
+                    policy=mtf_policy,
+                    concurrency=1,
+                )
+                context["mtf_runtime"] = mtf_runtime_audit
+            except Exception as exc:
+                context["mtf_runtime"] = {
+                    "ready": False,
+                    "error": f"{type(exc).__name__}:{str(exc)[:500]}",
+                }
+                return build_council_decision(
+                    {},
+                    context,
+                    artifact_status="MTF_CONTEXT_NOT_READY",
+                    live_decision_influence=False,
+                    mode=self.mode,
+                    shadow_decision_qualified=False,
+                    head_qualifications={},
+                )
+        elif feature_source == "canonical_feature_pipeline_v1":
+            feat = canonical_model_frame(
+                self.crypto,
+                frame,
+                market=str(market).upper(),
+                timeframe=str(
+                    bundle.get("timeframe")
+                    or frame.attrs.get("timeframe")
+                    or "1h"
+                ),
+                benchmark=None,
+            ).replace([np.inf, -np.inf], np.nan)
+        else:
+            feat = legacy_build_features(frame).replace(
+                [np.inf, -np.inf],
+                np.nan,
+            )
+        if feat.empty or not features:
             return build_council_decision(
                 {},
                 context,
@@ -124,7 +217,8 @@ class AgentRuntime:
                 shadow_decision_qualified=False,
                 head_qualifications={},
             )
-        x = feat.iloc[[-1]].loc[:, features]
+
+        x = feat.iloc[[-1]].reindex(columns=list(features))
         models = dict(bundle.get("models") or {})
         predictions: dict[str, float | None] = {
             "alpha_probability": None,
@@ -145,12 +239,15 @@ class AgentRuntime:
         except Exception:
             pass
         try:
-            predictions["predicted_return"] = float(models["return"].predict(x)[0])
+            predictions["predicted_return"] = float(
+                models["return"].predict(x)[0]
+            )
         except Exception:
             pass
         try:
             predictions["predicted_mae"] = max(
-                0.0, float(models["risk"].predict(x)[0])
+                0.0,
+                float(models["risk"].predict(x)[0]),
             )
         except Exception:
             pass
@@ -165,11 +262,14 @@ class AgentRuntime:
                 "risk": legacy_qualified,
                 "execution": True,
             }
+
         return build_council_decision(
             predictions,
             context,
             artifact_status=str(bundle.get("status") or "SHADOW"),
-            live_decision_influence=bool(bundle.get("live_decision_influence", False)),
+            live_decision_influence=bool(
+                bundle.get("live_decision_influence", False)
+            ),
             mode=self.mode,
             shadow_decision_qualified=legacy_qualified,
             head_qualifications=head_qualifications,

@@ -177,6 +177,59 @@ def extract_components(context: Mapping[str, Any]) -> dict[str, float | None]:
     return {name: extract_component(context, name) for name in COMPONENTS}
 
 
+def extract_research_component(
+    context: Mapping[str, Any],
+    name: str,
+) -> float | None:
+    eligible = extract_component(context, name)
+    if eligible is not None:
+        return eligible
+
+    agents = dict(context.get("agents") or {})
+
+    if name == "alpha":
+        return clip01(agents.get("alpha_probability"), None)
+
+    if name == "forecast":
+        return clip01(agents.get("forecast_score"), None)
+
+    if name == "regime":
+        return clip01(agents.get("regime_score"), None)
+
+    if name == "execution":
+        return clip01(agents.get("execution_score"), None)
+
+    if name == "risk":
+        try:
+            mae = abs(float(agents.get("predicted_mae")))
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(mae):
+            return None
+        return float(np.clip(np.exp(-mae / 0.03), 0.0, 1.0))
+
+    if name == "rl":
+        rl = dict(context.get("rl") or context.get("rl_preview") or {})
+        value = rl.get("long_probability")
+        if value is not None:
+            return clip01(value, None)
+        score = rl.get("score")
+        if score is not None:
+            return normalize_signed(score, None)
+        return None
+
+    return None
+
+
+def extract_research_components(
+    context: Mapping[str, Any],
+) -> dict[str, float | None]:
+    return {
+        name: extract_research_component(context, name)
+        for name in COMPONENTS
+    }
+
+
 def extract_descriptors(context: Mapping[str, Any]) -> dict[str, Any]:
     screen = dict(context.get("universe_screen") or {})
     technical = dict(screen.get("technical") or context.get("technical") or {})

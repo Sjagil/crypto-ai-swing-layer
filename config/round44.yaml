@@ -1,0 +1,74 @@
+
+enabled: true
+schema_version: round44_comprehensive_intelligence_v2
+
+universe:
+  target_markets: 25
+  require_full_25_for_candidate_stages: true
+
+market_data:
+  bitvavo_market_data_pro_enabled: true
+  book_depth: 1000
+  l1_required: true
+  l2_required: true
+  l2_sequence_validation_required_for_canary: true
+  l3_status: L3_UNSUPPORTED_BY_EXECUTION_VENUE
+  synthetic_l3_forbidden: true
+  fail_closed_on_sequence_gap: true
+  maximum_mdpro_age_seconds: 30
+
+technical:
+  timeframes: [15m, 1h, 2h, 4h, 1d, 1w]
+  canonical_feature_pipeline: true
+  canonical_indicator_registry: true
+  btc_relative_strength: true
+  full_feature_artifact_bucket_minutes: 15
+  research_labels_excluded_from_inputs: true
+  repainting_features_forbidden: true
+  supervised_and_rl_use_canonical_technical_features: true
+  historical_provider_context_backfill_forbidden: true
+
+context:
+  cmc: true
+  canonical_macro: true
+  canonical_market_mechanics: true
+  canonical_web_and_rss_news: true
+  publication_time_knowability_required: true
+  nlp: true
+  unavailable_provider_data_policy: UNAVAILABLE/DATA_PROVIDER_REQUIRED
+  synthetic_fill_forbidden: true
+
+learning:
+  prospective_buy_vs_no_trade: true
+  horizons_hours: [1, 4, 24, 72, 168]
+  feature_attribution_minimum_observations: 60
+  attribution_cross_horizon: true
+  prospective_context_agent_minimum_rows: 150
+  prospective_context_agent_minimum_markets: 5
+  feature_selection_train_only: true
+  redundancy_pruning: true
+  maximum_context_features: 72
+  supervised_maximum_features: 96
+  rl_maximum_features: 64
+  purged_chronological_split: true
+  embargo_required: true
+  untouched_oos_test: true
+  multi_seed_challenger_selection: true
+  stressed_cost_validation: true
+  retrain_only_on_new_evidence: true
+  automatic_model_live_promotion: false
+
+readiness:
+  ladder: [RESEARCH, SHADOW_QUALIFIED, PAPER_QUALIFIED, CANARY_CANDIDATE, LIVE_CANDIDATE]
+  minimum_shadow_span_hours: 72
+  minimum_paper_closed_trades: 30
+  minimum_paper_profit_factor: 1.15
+  minimum_complete_long_horizon_observations: 30
+  require_24h_72h_168h_for_paper: true
+  require_all_1h_4h_24h_72h_168h_for_live_candidate: true
+  require_full_25_mdpro_sequence_valid_for_canary: true
+  canonical_manual_authority_required: true
+  automatic_live_authority: false
+  automatic_live_promotion: false
+  threshold_relaxation_allowed: false
+  risk_widening_allowed: false

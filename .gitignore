@@ -118,3 +118,7 @@ config/live_strategy_approvals.yaml
 config/inventory_risk_override.json
 crypto-references/
 tools/reference_probes/nautilus/target/
+
+*.pre-round*
+*.pre-live-backup
+*.pre-remote

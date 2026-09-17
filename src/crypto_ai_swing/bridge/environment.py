@@ -11,6 +11,9 @@ except Exception:  # pragma: no cover - python-dotenv is a project dependency
 
 
 _SWING_PREFIX = "CRYPTO_SWING_"
+_ORCHESTRATOR_OWNED_KEYS = {
+    "CRYPTO_REPO_PATH",
+}
 
 
 def hydrate_canonical_environment(root: Path) -> dict[str, Any]:
@@ -46,7 +49,10 @@ def hydrate_canonical_environment(root: Path) -> dict[str, Any]:
 
     for key, value in raw.items():
         name = str(key)
-        if name.startswith(_SWING_PREFIX):
+        if (
+            name in _ORCHESTRATOR_OWNED_KEYS
+            or name.startswith(_SWING_PREFIX)
+        ):
             continue
         if value is None or not str(value).strip():
             continue

@@ -33,7 +33,26 @@ from crypto_ai_swing.agents.calibration import (
     purged_calibration_selection_split,
 )
 from crypto_ai_swing.agents.dataset import build_agent_dataset, purged_chronological_split
+from crypto_ai_swing.agents.canonical_features import select_train_only_features
 from crypto_ai_swing.agents.trials import register_trial_family
+from crypto_ai_swing.agents.hpo import HPOModelFactory
+from crypto_ai_swing.agents.label_noise import (
+    LABEL_NOISE_VERSION,
+    alpha_label_noise_summary,
+    economic_alpha_sample_weight,
+    fit_weighted_or_confident_subset,
+    resolve_label_noise_policy,
+)
+from crypto_ai_swing.agents.multitimeframe import (
+    MTF_FEATURE_SOURCE,
+    MTF_FUSION_VERSION,
+    build_multitimeframe_feature_tables,
+    fetch_multitimeframe_frames,
+    horizon_bars_for_hours,
+    mtf_contract_hash,
+    resolve_mtf_policy,
+    validate_selected_mtf_features,
+)
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
 from crypto_ai_swing.quant.evidence import (
     native_model_selection_evidence,
@@ -246,6 +265,36 @@ def _threshold_plan(
     }
 
 
+def _economic_sample_weight(
+    frame: pd.DataFrame,
+    *,
+    cost_floor: float,
+    label_noise_cfg: dict[str, Any] | None = None,
+) -> np.ndarray:
+    return economic_alpha_sample_weight(
+        frame,
+        cost_floor=cost_floor,
+        config=label_noise_cfg,
+    )
+
+
+def _fit_classifier_weighted(
+    model,
+    x,
+    y,
+    weights,
+    *,
+    fallback_min_weight: float = 0.25,
+):
+    return fit_weighted_or_confident_subset(
+        model,
+        x,
+        y,
+        weights,
+        fallback_min_weight=fallback_min_weight,
+    )
+
+
 def _direction_accuracy(actual: np.ndarray, predicted: np.ndarray) -> float:
     a = np.asarray(actual, dtype=float)
     p = np.asarray(predicted, dtype=float)
@@ -301,36 +350,95 @@ class AgentTrainer:
         self,
         *,
         markets: list[str] | None = None,
-        timeframe: str = "1h",
-        horizon_bars: int = 4,
+        timeframe: str = "15m",
+        horizon_bars: int = 16,
         minimum_rows: int = 1200,
         minimum_net_move_bps: float = 65.0,
     ) -> TrainingResult:
         selected_markets = [str(x).upper() for x in (markets or []) if str(x).strip()]
         if not selected_markets:
             selected_markets = list(self.universe.current()["markets"])
-        frames = self.crypto.ohlcv_many(
-            selected_markets,
-            timeframe,
-            persist=False,
-            concurrency=4,
+        mtf_cfg = dict(
+            (getattr(self.settings, "agents", {}) or {}).get("multitimeframe", {})
+            or {}
         )
-        frames = {
-            market: frame
-            for market, frame in frames.items()
-            if frame is not None and not frame.empty
-        }
+        mtf_policy = resolve_mtf_policy(mtf_cfg)
+        mtf_enabled = bool(
+            mtf_policy.enabled
+            and str(timeframe) == str(mtf_policy.base_timeframe)
+        )
+        mtf_audit = {"enabled": False, "version": None, "contract_hash": None}
+        feature_tables_override = None
+        maximum_candidates = 180
+
+        if mtf_enabled:
+            horizon_bars = horizon_bars_for_hours(
+                mtf_policy.base_timeframe,
+                mtf_policy.primary_horizon_hours,
+            )
+            frames_by_timeframe = fetch_multitimeframe_frames(
+                self.crypto,
+                selected_markets,
+                policy=mtf_policy,
+                concurrency=4,
+                historical=True,
+            )
+            frames, feature_tables_override, mtf_audit = (
+                build_multitimeframe_feature_tables(
+                    self.crypto,
+                    frames_by_timeframe,
+                    policy=mtf_policy,
+                    training=True,
+                )
+            )
+            mtf_audit["enabled"] = True
+            maximum_candidates = mtf_policy.candidate_maximum_features
+        else:
+            frames = self.crypto.ohlcv_many(
+                selected_markets,
+                timeframe,
+                persist=False,
+                concurrency=4,
+            )
+            frames = {
+                market: frame
+                for market, frame in frames.items()
+                if frame is not None and not frame.empty
+            }
+
         dataset = build_agent_dataset(
             frames,
             horizon_bars=horizon_bars,
             minimum_net_move_bps=minimum_net_move_bps,
+            feature_columns=None,
+            canonical_bridge=self.crypto,
+            feature_tables_override=feature_tables_override,
+            maximum_candidates=maximum_candidates,
+            consume_feature_tables_override=mtf_enabled,
         )
         if len(dataset.frame) < int(minimum_rows):
             raise ValueError(
                 f"insufficient causal rows: {len(dataset.frame)} < {minimum_rows}"
             )
         train, validation, test = purged_chronological_split(dataset)
-        features = dataset.feature_columns
+        maximum_selected_features = (
+            mtf_policy.supervised_maximum_features if mtf_enabled else 96
+        )
+        features = select_train_only_features(
+            train,
+            dataset.feature_columns,
+            target=train["target_forward_return"],
+            maximum_features=maximum_selected_features,
+        )
+        mtf_selected_groups = (
+            validate_selected_mtf_features(features, policy=mtf_policy)
+            if mtf_enabled
+            else {}
+        )
+        if len(features) < 8:
+            raise ValueError(
+                f"canonical train-only feature selection left {len(features)} features"
+            )
         x_train = train.loc[:, features]
         y_train = train["target_alpha"].astype(int)
         if y_train.nunique() < 2:
@@ -353,6 +461,26 @@ class AgentTrainer:
         val_realized = validation["target_forward_return"].to_numpy(float)
         cost_floor = float(minimum_net_move_bps) / 10_000.0
 
+        label_noise_cfg = dict(
+            (getattr(self.settings, "agents", {}) or {}).get(
+                "label_noise", {}
+            )
+            or {}
+        )
+        label_noise_policy = resolve_label_noise_policy(label_noise_cfg)
+        label_noise_summary = alpha_label_noise_summary(
+            train,
+            cost_floor=cost_floor,
+            config=label_noise_cfg,
+        )
+        alpha_train_weights = _economic_sample_weight(
+            train,
+            cost_floor=cost_floor,
+            label_noise_cfg=label_noise_cfg,
+        )
+        return_clip_low = float(train["target_forward_return"].quantile(0.005))
+        return_clip_high = float(train["target_forward_return"].quantile(0.995))
+        robust_return_train = train["target_forward_return"].clip(return_clip_low, return_clip_high)
         calibration_cfg = dict(
             (getattr(self.settings, "agents", {}) or {}).get(
                 "calibration", {}
@@ -377,11 +505,23 @@ class AgentTrainer:
         ].to_numpy(float)
         selection_markets = selection_frame["market"].astype(str).to_numpy()
 
+        hpo_factory = HPOModelFactory(
+            self.settings,
+            timeframe=timeframe,
+            horizon_bars=horizon_bars,
+            dataset_id=dataset.dataset_id,
+            feature_columns=features,
+            mtf_version=(MTF_FUSION_VERSION if mtf_enabled else None),
+            label_noise_version=LABEL_NOISE_VERSION,
+        )
         candidates = {
             "hist_gradient_boosting": _hist_classifier(),
             "logistic_balanced": _logistic_classifier(),
             "extra_trees": _extra_trees_classifier(),
         }
+        hpo_alpha = hpo_factory.alpha_candidate()
+        if hpo_alpha is not None:
+            candidates["optuna_hpo_alpha"] = hpo_alpha
         calibration_methods = tuple(
             str(value).strip().lower()
             for value in calibration_cfg.get(
@@ -399,7 +539,15 @@ class AgentTrainer:
         threshold_rows: dict[str, list[dict[str, Any]]] = {}
 
         for model_name, model in candidates.items():
-            model.fit(x_train, y_train)
+            _fit_classifier_weighted(
+                model,
+                x_train,
+                y_train,
+                alpha_train_weights,
+                fallback_min_weight=(
+                    label_noise_policy.fallback_min_weight
+                ),
+            )
             raw_calibration = model.predict_proba(x_calibration)[:, 1]
             for calibration_method in calibration_methods:
                 calibrator = fit_probability_calibrator(
@@ -473,9 +621,21 @@ class AgentTrainer:
                 "schema_version": "agent_alpha_tournament_v4",
                 "dataset_id": dataset.dataset_id,
                 "feature_columns": list(features),
+                "feature_source": (
+                    MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+                ),
+                "multitimeframe_version": (
+                    MTF_FUSION_VERSION if mtf_enabled else None
+                ),
+                "multitimeframe_contract_hash": (
+                    mtf_contract_hash(mtf_policy) if mtf_enabled else None
+                ),
+                "multitimeframe_selected_groups": mtf_selected_groups,
                 "timeframe": timeframe,
                 "horizon_bars": int(horizon_bars),
                 "minimum_net_move_bps": float(minimum_net_move_bps),
+                "label_noise_version": LABEL_NOISE_VERSION,
+                "label_noise_policy": label_noise_summary["policy"],
                 "models": sorted(candidates),
                 "calibration_methods": list(calibration_methods),
                 "thresholds": [
@@ -510,12 +670,18 @@ class AgentTrainer:
         alpha = fitted[winner_key]
         threshold = float(winner_row["threshold_plan"]["chosen"]["threshold"])
 
-        regime = _hist_classifier().fit(
+        regime_model = hpo_factory.regime_model() or _hist_classifier()
+        return_model = hpo_factory.return_model() or _regressor()
+        risk_quantile = 0.75
+        risk_model = (
+            hpo_factory.risk_model(quantile=risk_quantile)
+            or _regressor(quantile=risk_quantile)
+        )
+        regime = regime_model.fit(
             x_train, train["target_regime_persistence"].astype(int)
         )
-        ret = _regressor().fit(x_train, train["target_forward_return"])
-        risk_quantile = 0.75
-        risk = _regressor(quantile=risk_quantile).fit(x_train, train["target_mae"])
+        ret = return_model.fit(x_train, robust_return_train)
+        risk = risk_model.fit(x_train, train["target_mae"])
 
         x_test = test.loc[:, features]
         alpha_p = alpha.predict_proba(x_test)[:, 1]
@@ -687,6 +853,19 @@ class AgentTrainer:
             "validation_rows": len(validation),
             "test_rows": len(test),
             "market_count": len(dataset.markets),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe": mtf_audit,
+            "multitimeframe_selected_groups": mtf_selected_groups,
+            "label_noise_version": LABEL_NOISE_VERSION,
+            "label_noise": label_noise_summary,
             "alpha_model": winner_name,
             "alpha_probability_threshold": threshold,
             "alpha_auc": test_auc,
@@ -749,6 +928,7 @@ class AgentTrainer:
             "head_qualifications": head_qualifications,
             "shadow_decision_qualified": directional_qualified,
             "model_tournament": tournament,
+            "hpo": hpo_factory.summary(),
             "chronological": True,
             "purged": True,
             "purge_bars": int(dataset.horizon_bars),
@@ -768,10 +948,22 @@ class AgentTrainer:
             "dataset_id": dataset.dataset_id,
             "dataset_rows": len(dataset.frame),
             "feature_columns": list(features),
+            "feature_source": (
+                MTF_FEATURE_SOURCE if mtf_enabled else "canonical_feature_pipeline_v1"
+            ),
+            "multitimeframe_version": (
+                MTF_FUSION_VERSION if mtf_enabled else None
+            ),
+            "multitimeframe_contract_hash": (
+                mtf_contract_hash(mtf_policy) if mtf_enabled else None
+            ),
+            "multitimeframe": mtf_audit,
             "markets": list(dataset.markets),
             "timeframe": timeframe,
             "horizon_bars": int(horizon_bars),
             "minimum_net_move_bps": float(minimum_net_move_bps),
+            "label_noise_version": LABEL_NOISE_VERSION,
+            "label_noise": label_noise_summary,
             "alpha_probability_threshold": threshold,
             "alpha_calibration_method": winner_calibration_method,
             "global_known_trial_count": trial_ledger["global_known_trial_count"],

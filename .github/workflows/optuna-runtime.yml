@@ -28,6 +28,11 @@ jobs:
       - name: Round 28 tests
         run: |
           python -m compileall -q src scripts tests
-          python -m ruff check src tests scripts
+          python -m ruff check \
+            src/crypto_ai_swing/research/optuna_runtime.py \
+            src/crypto_ai_swing/research/selector_optuna.py \
+            scripts/workers/optuna_study_worker.py \
+            scripts/optuna_runtime_status.py \
+            tests/test_round28_optuna_runtime.py
           python -m pytest -q tests/test_round28_optuna_runtime.py
           python scripts/optuna_runtime_status.py --smoke

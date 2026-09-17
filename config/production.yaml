@@ -1,12 +1,10 @@
 schema: crypto_ai_swing_production_rc_v1
-
 live_guard:
   require_remote_runtime_checks: true
   require_canary_authority_active: true
   block_new_entries_on_unresolved_execution: true
   require_post_submit_reconciliation: true
   automatic_resubmission_after_crash: false
-
 safe_canary_caps:
   maximum_order_eur: 10
   maximum_total_exposure_eur: 10
@@ -14,12 +12,10 @@ safe_canary_caps:
   maximum_new_orders_per_day: 1
   maximum_risk_per_trade_eur: 1
   maximum_slippage_bps: 25
-
 certification:
   minimum_real_roundtrips: 3
   require_zero_unresolved_operations: true
   require_restart_recovery_test: true
-
 scaling:
   enabled: false
   require_entry_selector_qualified: true
@@ -27,3 +23,11 @@ scaling:
   require_net_edge_qualified: true
   require_execution_certification: true
   automatic_scaling: false
+full_live:
+  enabled: true
+  require_remote_runtime_checks: true
+  require_post_submit_reconciliation: true
+  require_qualified_model_influence: true
+  require_positive_net_edge: true
+  capital_sizing_authority: Sjagil/crypto:risk.risk_manager+research.trading_math
+  execution_authority: Sjagil/crypto:core.swing_layer_live

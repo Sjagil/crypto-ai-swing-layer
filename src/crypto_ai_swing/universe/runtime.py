@@ -91,6 +91,10 @@ class UniverseManager:
         self.state_path = settings.project_root / runtime.get(
             "state_path", "output/crypto_ai_swing/universe/latest.json"
         )
+        self.history_path = settings.project_root / runtime.get(
+            "history_path",
+            "output/crypto_ai_swing/universe/history.jsonl",
+        )
         self._exchange_factory = exchange_factory
         self._crypto_settings = crypto_settings
 
@@ -380,10 +384,33 @@ class UniverseManager:
             },
         )
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_payload = snapshot.to_dict()
         self.state_path.write_text(
-            json.dumps(snapshot.to_dict(), indent=2, default=str),
+            json.dumps(
+                snapshot_payload,
+                indent=2,
+                default=str,
+            ),
             encoding="utf-8",
         )
+
+        self.history_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        with self.history_path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    snapshot_payload,
+                    sort_keys=True,
+                    default=str,
+                )
+                + "\n"
+            )
+
         return snapshot
 
 

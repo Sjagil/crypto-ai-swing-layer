@@ -182,6 +182,8 @@ class StrategyChallengerLab:
         self.minimum_prospective_span_hours = float(cfg.get("minimum_prospective_span_hours", 72.0))
         self.minimum_positive_fraction = float(cfg.get("minimum_positive_fraction", 0.55))
         self.minimum_uplift_bps = float(cfg.get("minimum_uplift_bps", 5.0))
+        self.minimum_selection_fraction = float(cfg.get("minimum_selection_fraction", 0.08))
+        self.maximum_selection_fraction = float(cfg.get("maximum_selection_fraction", 0.75))
         self.multiple_testing_alpha = float(cfg.get("multiple_testing_alpha", 0.05))
         self.root = Path(settings.project_root) / "output/crypto_ai_swing/research/strategy_lab"
         self.root.mkdir(parents=True, exist_ok=True)
@@ -341,12 +343,24 @@ class StrategyChallengerLab:
             val = self._metrics(validation, candidate)
             dev_mean = dev.get("mean_normal_net_bps")
             val_mean = val.get("mean_normal_net_bps")
+            dev_fraction = float(dev.get("selection_fraction") or 0.0)
+            val_fraction = float(val.get("selection_fraction") or 0.0)
+            dev_uplift = float(dev.get("mean_uplift_vs_baseline_bps") or -1e9)
+            val_uplift = float(val.get("mean_uplift_vs_baseline_bps") or -1e9)
             objective = -1e12
             if (
                 dev.get("selected", 0) >= 20
                 and val.get("selected", 0) >= self.minimum_validation_selected
                 and dev_mean is not None
                 and val_mean is not None
+                and self.minimum_selection_fraction
+                    <= dev_fraction
+                    <= self.maximum_selection_fraction
+                and self.minimum_selection_fraction
+                    <= val_fraction
+                    <= self.maximum_selection_fraction
+                and dev_uplift >= self.minimum_uplift_bps
+                and val_uplift >= self.minimum_uplift_bps
             ):
                 objective = (
                     float(val.get("one_sided_90_lcb_bps") or -1e6)
@@ -358,7 +372,10 @@ class StrategyChallengerLab:
                 "validation_positive_mean": val_mean is not None and float(val_mean) > 0.0,
                 "validation_positive_fraction": float(val.get("positive_fraction") or 0.0) >= self.minimum_positive_fraction,
                 "validation_bayesian": float((val.get("bayesian") or {}).get("probability_mean_positive", 0.0)) >= 0.90,
-                "validation_uplift": float(val.get("mean_uplift_vs_baseline_bps") or -1e9) > 0.0,
+                "discovery_selective": self.minimum_selection_fraction <= dev_fraction <= self.maximum_selection_fraction,
+                "validation_selective": self.minimum_selection_fraction <= val_fraction <= self.maximum_selection_fraction,
+                "discovery_uplift": dev_uplift >= self.minimum_uplift_bps,
+                "validation_uplift": val_uplift >= self.minimum_uplift_bps,
             }
             ranked.append({
                 "name": name,

@@ -23,6 +23,7 @@ signals:
     supervised_ml: 0.30
     forecast: 0.15
     rl_challenger: 0.10
+    meta_edge_manager: 0.12
 
 holding:
   minimum_bars: 3
