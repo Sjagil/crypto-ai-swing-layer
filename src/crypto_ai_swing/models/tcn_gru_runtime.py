@@ -6,9 +6,6 @@ from typing import Any
 
 import pandas as pd
 
-from crypto_ai_swing.models.tcn_gru import load_tcn_gru_challenger
-
-
 class TCNGRURuntime:
     """Hot-reloading runtime for the evidence-qualified TCN+GRU champion."""
 
@@ -46,6 +43,13 @@ class TCNGRURuntime:
             if self.mode == "live" and meta.get("qualified") is not True:
                 raise ValueError("TCN+GRU live pointer is not qualified")
             artifact = Path(str(meta.get("artifact_path") or ""))
+
+            # Torch belongs to the optional AI runtime. Import the temporal
+            # model only when a TCN+GRU artifact actually needs to be loaded.
+            from crypto_ai_swing.models.tcn_gru import (
+                load_tcn_gru_challenger,
+            )
+
             model = load_tcn_gru_challenger(artifact)
             self._model = model
             self._meta = dict(meta)

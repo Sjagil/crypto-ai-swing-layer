@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
+from crypto_ai_swing.agents.live_promotion import LiveModelGovernor
 from crypto_ai_swing.agents.prospective_context import ProspectiveContextAgent
 from crypto_ai_swing.agents.rl_multi_market import MultiMarketRLTrainer
 from crypto_ai_swing.agents.rl_runtime import RLRuntime
 from crypto_ai_swing.agents.runtime import AgentRuntime
-from crypto_ai_swing.agents.training import AgentTrainer
-from crypto_ai_swing.agents.live_promotion import LiveModelGovernor
 from crypto_ai_swing.agents.tcn_gru_live_governor import TCNGRULiveGovernor
+from crypto_ai_swing.agents.training import AgentTrainer
 from crypto_ai_swing.bridge.crypto_operations import NativeOperationsBridge
 from crypto_ai_swing.research.feature_attribution import Round44FeatureAttribution
 from crypto_ai_swing.research.live_readiness import Round44LiveReadiness
