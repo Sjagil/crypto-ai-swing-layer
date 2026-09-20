@@ -16,7 +16,16 @@ class _Bridge:
         return self._settings
 
 
-def test_cmc_pit_merge_never_uses_future_available_rows(tmp_path: Path):
+def test_cmc_pit_merge_never_uses_future_available_rows(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # This test owns its temporary PIT store. Do not allow a developer/runtime
+    # CMC_STARTUP_ROOT environment variable to redirect it to production data.
+    monkeypatch.delenv(
+        "CMC_STARTUP_ROOT",
+        raising=False,
+    )
     path = tmp_path / "coinmarketcap_startup" / "features" / "pit_features.parquet"
     path.parent.mkdir(parents=True)
     pd.DataFrame(

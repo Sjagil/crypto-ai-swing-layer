@@ -47,6 +47,27 @@ def _load(path: Path) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _normalize_crypto_ids(value: Any) -> set[int]:
+    """Normalize CMC push crypto_ids from scalar or collection form."""
+    if value is None:
+        return set()
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        values = (value,)
+
+    result: set[int] = set()
+
+    for raw in values:
+        try:
+            result.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+
+    return result
+
+
 def _finite(value: Any) -> float | None:
     if isinstance(value, bool):
         return float(value)
@@ -410,9 +431,16 @@ class CMCStartupBridge:
 
                 params = dict(event.get("params") or {})
 
-                crypto_ids = params.get("crypto_ids") or []
+                event_market = str(
+                    event.get("market") or ""
+                ).upper()
 
-                match = cmc_id in {int(value) for value in crypto_ids if str(value).isdigit()}
+                match = event_market == market
+
+                if not match:
+                    match = cmc_id in _normalize_crypto_ids(
+                        params.get("crypto_ids")
+                    )
 
                 if not match:
                     platform = str(params.get("platform_id") or params.get("platform") or "")
