@@ -137,3 +137,51 @@ def test_mtf_source_contains_aggregate_permission_gates():
     assert "MTF_TREND_AGGREGATE_NEGATIVE" in source
     assert "minimum_macro_score_for_long" in source
     assert "minimum_trend_score_for_long" in source
+
+
+def test_calibration_split_uses_actual_label_end_time():
+    times = pd.date_range(
+        "2025-01-01",
+        periods=300,
+        freq="1h",
+        tz="UTC",
+    )
+
+    frame = pd.DataFrame(
+        {
+            "feature_time": np.repeat(
+                times,
+                2,
+            ),
+            "label_end_time": np.repeat(
+                times
+                + np.timedelta64(12, "h"),
+                2,
+            ),
+            "target_alpha": np.tile(
+                [0, 1],
+                len(times),
+            ),
+        }
+    )
+
+    calibration, selection = (
+        purged_calibration_selection_split(
+            frame,
+            horizon_bars=4,
+            calibration_fraction=0.5,
+        )
+    )
+
+    assert (
+        pd.Timestamp(
+            calibration[
+                "label_end_time"
+            ].max()
+        )
+        < pd.Timestamp(
+            selection[
+                "feature_time"
+            ].min()
+        )
+    )

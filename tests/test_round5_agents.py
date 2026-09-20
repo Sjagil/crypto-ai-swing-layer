@@ -25,3 +25,97 @@ def test_shadow_agent_cannot_silently_gain_live_authority():
     assert shadow.entry_blocked is True
     assert live.entry_blocked is False
     assert live.live_influence is False
+
+
+def test_purged_split_handles_sparse_market_calendars():
+    from crypto_ai_swing.agents.dataset import AgentDataset
+
+    dense_times = pd.date_range(
+        "2025-01-01",
+        periods=1000,
+        freq="1h",
+        tz="UTC",
+    )
+
+    sparse_times = pd.date_range(
+        "2025-01-01",
+        periods=300,
+        freq="6h",
+        tz="UTC",
+    )
+
+    dense = pd.DataFrame(
+        {
+            "feature_time": dense_times,
+            "label_end_time": (
+                dense_times
+                + np.timedelta64(4, "h")
+            ),
+            "market": "BTC-EUR",
+        }
+    )
+
+    sparse = pd.DataFrame(
+        {
+            "feature_time": sparse_times,
+            "label_end_time": (
+                sparse_times
+                + np.timedelta64(24, "h")
+            ),
+            "market": "SPARSE-EUR",
+        }
+    )
+
+    frame = pd.concat(
+        [dense, sparse],
+        ignore_index=True,
+    ).sort_values(
+        ["feature_time", "market"]
+    )
+
+    dataset = AgentDataset(
+        frame=frame,
+        feature_columns=(),
+        horizon_bars=4,
+        dataset_id="test_sparse_calendar",
+        time_start=str(
+            frame["feature_time"].min()
+        ),
+        time_end=str(
+            frame["feature_time"].max()
+        ),
+        markets=(
+            "BTC-EUR",
+            "SPARSE-EUR",
+        ),
+    )
+
+    train, validation, test = (
+        purged_chronological_split(
+            dataset
+        )
+    )
+
+    assert (
+        pd.Timestamp(
+            train["label_end_time"].max()
+        )
+        < pd.Timestamp(
+            validation[
+                "feature_time"
+            ].min()
+        )
+    )
+
+    assert (
+        pd.Timestamp(
+            validation[
+                "label_end_time"
+            ].max()
+        )
+        < pd.Timestamp(
+            test[
+                "feature_time"
+            ].min()
+        )
+    )

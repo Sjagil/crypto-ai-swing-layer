@@ -254,26 +254,188 @@ def purged_chronological_split(
     train_fraction: float = 0.60,
     validation_fraction: float = 0.20,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    frame = dataset.frame.sort_values(["feature_time", "market"])
-    times = pd.Index(pd.to_datetime(frame["feature_time"], utc=True).unique()).sort_values()
+    """
+    Chronological train/validation/test split with two layers of protection:
+
+    1. bar-count embargo around the nominal boundaries;
+    2. label-aware purge using the ACTUAL label_end_time.
+
+    The second layer is required for mixed/gappy market calendars because
+    `horizon_bars` global timestamps are not guaranteed to cover the future
+    label horizon of every individual market.
+
+    No row is allowed into train when its label can see validation, and no
+    validation row is allowed when its label can see test.
+    """
+    train_fraction = float(train_fraction)
+    validation_fraction = float(validation_fraction)
+
+    if not 0.0 < train_fraction < 1.0:
+        raise ValueError("train_fraction must be between 0 and 1")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    if train_fraction + validation_fraction >= 1.0:
+        raise ValueError(
+            "train_fraction + validation_fraction must leave a test partition"
+        )
+
+    frame = dataset.frame.sort_values(
+        ["feature_time", "market"]
+    ).copy()
+
+    feature_time = pd.to_datetime(
+        frame["feature_time"],
+        utc=True,
+    )
+    label_end_time = pd.to_datetime(
+        frame["label_end_time"],
+        utc=True,
+    )
+
+    if (label_end_time <= feature_time).any():
+        raise ValueError("labels are not strictly future-only")
+
+    times = pd.Index(
+        feature_time.unique()
+    ).sort_values()
+
     if len(times) < 30:
         raise ValueError("insufficient timestamps for split")
-    train_end = max(1, int(len(times) * train_fraction))
-    val_end = max(train_end + 1, int(len(times) * (train_fraction + validation_fraction)))
-    purge = max(1, dataset.horizon_bars)
-    train_times = times[: max(1, train_end - purge)]
-    val_start = min(len(times), train_end + purge)
-    val_times = times[val_start : max(val_start, val_end - purge)]
-    test_start = min(len(times), val_end + purge)
-    test_times = times[test_start:]
-    ft = pd.to_datetime(frame["feature_time"], utc=True)
-    train = frame[ft.isin(train_times)].copy()
-    val = frame[ft.isin(val_times)].copy()
-    test = frame[ft.isin(test_times)].copy()
-    if min(len(train), len(val), len(test)) <= 0:
-        raise ValueError("purged split produced empty partition")
-    if pd.Timestamp(train["label_end_time"].max()) >= pd.Timestamp(val["feature_time"].min()):
-        raise ValueError("train labels overlap validation")
-    if pd.Timestamp(val["label_end_time"].max()) >= pd.Timestamp(test["feature_time"].min()):
-        raise ValueError("validation labels overlap test")
-    return train, val, test
+
+    train_end = max(
+        1,
+        int(len(times) * train_fraction),
+    )
+    val_end = max(
+        train_end + 1,
+        int(
+            len(times)
+            * (train_fraction + validation_fraction)
+        ),
+    )
+
+    # Keep the original bar-count embargo as a first defensive layer.
+    purge = max(
+        1,
+        int(dataset.horizon_bars),
+    )
+
+    train_times = times[
+        : max(1, train_end - purge)
+    ]
+
+    val_start = min(
+        len(times),
+        train_end + purge,
+    )
+    val_stop = max(
+        val_start,
+        val_end - purge,
+    )
+    val_times = times[
+        val_start:val_stop
+    ]
+
+    test_start = min(
+        len(times),
+        val_end + purge,
+    )
+    test_times = times[
+        test_start:
+    ]
+
+    if (
+        len(train_times) == 0
+        or len(val_times) == 0
+        or len(test_times) == 0
+    ):
+        raise ValueError(
+            "purged split produced empty timestamp partition"
+        )
+
+    validation_start_time = pd.Timestamp(
+        val_times[0]
+    )
+    test_start_time = pd.Timestamp(
+        test_times[0]
+    )
+
+    # CRITICAL:
+    # Membership in a timestamp partition is not enough.
+    # Purge using the actual future label lifetime.
+    train_mask = (
+        feature_time.isin(train_times)
+        & (label_end_time < validation_start_time)
+    )
+
+    validation_mask = (
+        feature_time.isin(val_times)
+        & (label_end_time < test_start_time)
+    )
+
+    test_mask = feature_time.isin(
+        test_times
+    )
+
+    train = frame.loc[
+        train_mask
+    ].copy()
+    validation = frame.loc[
+        validation_mask
+    ].copy()
+    test = frame.loc[
+        test_mask
+    ].copy()
+
+    if min(
+        len(train),
+        len(validation),
+        len(test),
+    ) <= 0:
+        raise ValueError(
+            "label-aware purged split produced empty partition"
+        )
+
+    # Final hard assertions remain in place.
+    # We do NOT weaken these guards.
+    train_label_max = pd.Timestamp(
+        pd.to_datetime(
+            train["label_end_time"],
+            utc=True,
+        ).max()
+    )
+    validation_feature_min = pd.Timestamp(
+        pd.to_datetime(
+            validation["feature_time"],
+            utc=True,
+        ).min()
+    )
+
+    validation_label_max = pd.Timestamp(
+        pd.to_datetime(
+            validation["label_end_time"],
+            utc=True,
+        ).max()
+    )
+    test_feature_min = pd.Timestamp(
+        pd.to_datetime(
+            test["feature_time"],
+            utc=True,
+        ).min()
+    )
+
+    if train_label_max >= validation_feature_min:
+        raise ValueError(
+            "train labels overlap validation after label-aware purge: "
+            f"train_label_max={train_label_max.isoformat()} "
+            f"validation_start={validation_feature_min.isoformat()}"
+        )
+
+    if validation_label_max >= test_feature_min:
+        raise ValueError(
+            "validation labels overlap test after label-aware purge: "
+            f"validation_label_max={validation_label_max.isoformat()} "
+            f"test_start={test_feature_min.isoformat()}"
+        )
+
+    return train, validation, test
