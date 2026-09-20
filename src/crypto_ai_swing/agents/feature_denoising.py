@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import pandas as pd
 
-
 NOISE_CONTROL_VERSION = "round47f_noise_control_v1"
 DEFAULT_STABILITY_BLOCKS = 4
 MAX_FEATURE_SELECTION_ROWS = 100_000
@@ -21,9 +20,7 @@ def _bounded_train_selection_sample(
 ) -> tuple[pd.DataFrame, pd.Series | None]:
     if len(train) <= int(maximum_rows):
         selected_target = (
-            _as_numeric_positional(target, length=len(train))
-            if target is not None
-            else None
+            _as_numeric_positional(target, length=len(train)) if target is not None else None
         )
         return train, selected_target
 
@@ -43,9 +40,7 @@ def _bounded_train_selection_sample(
 
     if len(positions) < maximum_rows:
         already = set(positions)
-        for value in np.linspace(
-            0, len(train) - 1, maximum_rows, dtype=int
-        ):
+        for value in np.linspace(0, len(train) - 1, maximum_rows, dtype=int):
             index = int(value)
             if index not in already:
                 positions.append(index)
@@ -62,7 +57,6 @@ def _bounded_train_selection_sample(
     return sampled, sampled_target
 
 
-
 _GROUP_WEIGHTS = {
     "pattern": 0.13,
     "strategy": 0.07,
@@ -71,7 +65,8 @@ _GROUP_WEIGHTS = {
     "structure": 0.06,
     "volume_liquidity": 0.06,
     "volatility": 0.05,
-    "core": 0.12,
+    "cmc": 0.06,
+    "core": 0.06,
     "mtf_1h": 0.08,
     "mtf_2h": 0.07,
     "mtf_4h": 0.08,
@@ -88,6 +83,7 @@ _GROUP_ORDER = (
     "structure",
     "volume_liquidity",
     "volatility",
+    "cmc",
     "core",
     "mtf_1h",
     "mtf_2h",
@@ -122,6 +118,9 @@ def feature_group(name: str) -> str:
             return f"mtf_{timeframe}"
     if token.startswith("mtf_cross__"):
         return "mtf_cross"
+
+    if token.startswith("cmc_"):
+        return "cmc"
 
     if token.startswith("pattern_"):
         return "pattern"
@@ -205,9 +204,7 @@ def _as_numeric_positional(
         ).reset_index(drop=True)
 
     if len(numeric) != int(length):
-        raise ValueError(
-            f"target length {len(numeric)} != train length {length}"
-        )
+        raise ValueError(f"target length {len(numeric)} != train length {length}")
     return numeric
 
 
@@ -256,9 +253,7 @@ def _rank_ic(x: pd.Series, y: pd.Series) -> float:
     if x_valid.nunique(dropna=True) < 2 or y_valid.nunique(dropna=True) < 2:
         return 0.0
 
-    value = x_valid.rank(method="average").corr(
-        y_valid.rank(method="average")
-    )
+    value = x_valid.rank(method="average").corr(y_valid.rank(method="average"))
     return float(value) if pd.notna(value) and np.isfinite(value) else 0.0
 
 
@@ -295,9 +290,7 @@ def _feature_score(
         return None
 
     unsupervised_quality = float(
-        coverage
-        * max(activity_quality, 0.05)
-        * min(1.0, np.log1p(unique_count) / np.log(21.0))
+        coverage * max(activity_quality, 0.05) * min(1.0, np.log1p(unique_count) / np.log(21.0))
     )
 
     if target is None:
@@ -341,31 +334,16 @@ def _feature_score(
             sign_consistency = 0.0
         else:
             sign_consistency = float(
-                np.mean(
-                    [
-                        np.sign(value) == reference_sign
-                        for value in nonzero
-                    ]
-                )
+                np.mean([np.sign(value) == reference_sign for value in nonzero])
             )
-        block_presence = float(
-            np.mean(
-                [
-                    abs(value) >= 0.01
-                    for value in block_values
-                ]
-            )
-        )
+        block_presence = float(np.mean([abs(value) >= 0.01 for value in block_values]))
     else:
         sign_consistency = 0.0
         block_presence = 0.0
 
     raw_signal = 0.45 * abs(global_ic) + 0.55 * median_abs
     stability_score = float(
-        raw_signal
-        * (0.25 + 0.75 * sign_consistency)
-        * (0.50 + 0.50 * block_presence)
-        * coverage
+        raw_signal * (0.25 + 0.75 * sign_consistency) * (0.50 + 0.50 * block_presence) * coverage
     )
 
     return FeatureScore(
@@ -387,16 +365,11 @@ def _feature_score(
 def _group_budgets(total: int) -> dict[str, int]:
     total = max(1, int(total))
     budgets = {
-        group: max(1, int(round(total * weight)))
-        for group, weight in _GROUP_WEIGHTS.items()
+        group: max(1, int(round(total * weight))) for group, weight in _GROUP_WEIGHTS.items()
     }
 
     while sum(budgets.values()) > total:
-        reducible = [
-            group
-            for group in reversed(_GROUP_ORDER)
-            if budgets[group] > 1
-        ]
+        reducible = [group for group in reversed(_GROUP_ORDER) if budgets[group] > 1]
         if not reducible:
             break
         budgets[reducible[0]] -= 1
@@ -536,9 +509,7 @@ def select_stable_train_features(
         by_group[str(row["group"])].append(row)
 
     ordered_names = [str(row["name"]) for row in diagnostics]
-    numeric = scoring_train.reindex(columns=ordered_names).apply(
-        pd.to_numeric, errors="coerce"
-    )
+    numeric = scoring_train.reindex(columns=ordered_names).apply(pd.to_numeric, errors="coerce")
     for name in numeric.columns:
         if pd.api.types.is_float_dtype(numeric[name]):
             numeric[name] = numeric[name].astype(np.float32, copy=False)
@@ -589,9 +560,8 @@ def select_stable_train_features(
             if name in selected or redundant(name, selected):
                 continue
             if scoring_target is not None:
-                if (
-                    float(row["stability_score"]) < 0.001
-                    and len(selected) >= max(8, int(maximum_features * 0.75))
+                if float(row["stability_score"]) < 0.001 and len(selected) >= max(
+                    8, int(maximum_features * 0.75)
                 ):
                     continue
             selected.append(name)
@@ -603,10 +573,7 @@ def select_stable_train_features(
 
 def feature_group_counts(features: Iterable[str]) -> dict[str, int]:
     counts = Counter(feature_group(str(name)) for name in features)
-    return {
-        group: int(counts.get(group, 0))
-        for group in _GROUP_ORDER
-    }
+    return {group: int(counts.get(group, 0)) for group in _GROUP_ORDER}
 
 
 __all__ = [

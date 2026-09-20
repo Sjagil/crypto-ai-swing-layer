@@ -1606,6 +1606,8 @@ class TCNGRUChallengerTrainer:
             frames,
             horizon_bars=horizon_bars,
             minimum_net_move_bps=minimum_net_move_bps,
+            feature_columns=None,
+            canonical_bridge=self.crypto,
         )
 
     def train(

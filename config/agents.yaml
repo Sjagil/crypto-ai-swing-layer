@@ -199,6 +199,11 @@ continuous_learning:
   qualified_models_have_live_influence: true
   continuous_data_collection: true
   automatic_model_live_promotion: true
+  factory_refresh_seconds: 21600
+  factory_maximum_rows: 50000
+  cmc_feature_research_seconds: 21600
+  cmc_feature_research_timeframe: 1d
+  cmc_feature_research_horizon_bars: 7
 tcn_gru:
   enabled: true
   role: continuous_challenger

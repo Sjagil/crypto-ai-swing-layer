@@ -11,37 +11,14 @@ from crypto_ai_swing.data.canonical import canonicalize_ohlcv
 from crypto_ai_swing.data.features import build_features
 
 DEFAULT_FEATURES: tuple[str, ...] = (
-    "ret_1",
-    "ret_4",
-    "ret_8",
-    "ret_24",
-    "log_ret_1",
-    "trend_8_20",
-    "trend_20_50",
-    "trend_50_200",
-    "rsi_14",
-    "atr_pct",
-    "rv_24",
-    "rv_168",
-    "vol_regime",
-    "bb_width",
-    "bb_z",
-    "breakout_20",
-    "distance_low_20",
-    "volume_z_48",
-    "dollar_volume_log",
-    "range_pct",
-    "close_location",
-    "downside_rv_24",
-    "ewma_rv_24",
-    "skew_24",
-    "kurtosis_24",
-    "momentum_vol_adj_8",
-    "drawdown_48",
-    "atr_z_168",
+    "ret_1", "ret_4", "ret_8", "ret_24", "log_ret_1",
+    "trend_8_20", "trend_20_50", "trend_50_200", "rsi_14", "atr_pct",
+    "rv_24", "rv_168", "vol_regime", "bb_width", "bb_z", "breakout_20",
+    "distance_low_20", "volume_z_48", "dollar_volume_log", "range_pct",
+    "close_location", "downside_rv_24", "ewma_rv_24", "skew_24",
+    "kurtosis_24", "momentum_vol_adj_8", "drawdown_48", "atr_z_168",
     "tail_q05_168",
 )
-
 
 @dataclass(frozen=True)
 class AgentDataset:
@@ -52,7 +29,6 @@ class AgentDataset:
     time_start: str
     time_end: str
     markets: tuple[str, ...]
-
 
 def _future_extreme(series: pd.Series, horizon: int, mode: str) -> pd.Series:
     table = pd.concat([series.shift(-step) for step in range(1, horizon + 1)], axis=1)
@@ -66,7 +42,9 @@ def _deterministic_candidate_sample(
 ) -> pd.DataFrame:
     if len(frame) <= int(maximum_rows):
         return frame
-    positions = np.linspace(0, len(frame) - 1, int(maximum_rows), dtype=int)
+    positions = np.linspace(
+        0, len(frame) - 1, int(maximum_rows), dtype=int
+    )
     return frame.iloc[positions]
 
 
@@ -151,15 +129,12 @@ def build_agent_dataset(
             missing = [name for name in features if name not in feat.columns]
             if missing:
                 raise ValueError(f"missing features: {missing}")
-        # Build the numerical feature block in one operation.
-        # Assigning hundreds of columns individually fragments the
-        # DataFrame and causes large transient memory amplification.
-        selected = (
-            feat.reindex(columns=list(features))
-            .apply(pd.to_numeric, errors="coerce")
-            .astype(np.float32, copy=False)
-            .copy()
-        )
+        selected = feat.reindex(columns=list(features)).copy()
+        for feature_name in features:
+            if feature_name in selected.columns:
+                selected[feature_name] = pd.to_numeric(
+                    selected[feature_name], errors="coerce"
+                ).astype(np.float32, copy=False)
         future_close = ohlcv["close"].shift(-horizon)
         future_low = _future_extreme(ohlcv["low"], horizon, "min")
         future_high = _future_extreme(ohlcv["high"], horizon, "max")
@@ -170,33 +145,22 @@ def build_agent_dataset(
         past_return = ohlcv["close"] / ohlcv["close"].shift(horizon) - 1.0
         net_return = forward_return - threshold
         path_quality = ((mfe - mae) / (mfe + mae + 1e-9)).clip(-1.0, 1.0)
-        regime_persistence = (past_return * forward_return > 0.0) & (
-            forward_return.abs() >= threshold * 0.50
+        regime_persistence = (
+            (past_return * forward_return > 0.0)
+            & (forward_return.abs() >= threshold * 0.50)
         )
 
-        label_end_time = selected.index.to_series().shift(-horizon)
-
-        metadata = pd.DataFrame(
-            {
-                "target_forward_return": forward_return.astype(np.float32, copy=False),
-                "target_net_return": net_return.astype(np.float32, copy=False),
-                "target_mae": mae.astype(np.float32, copy=False),
-                "target_mfe": mfe.astype(np.float32, copy=False),
-                "target_path_quality": path_quality.astype(np.float32, copy=False),
-                "target_alpha": (net_return > 0.0).astype(np.float32),
-                "target_regime_persistence": regime_persistence.astype(np.float32),
-                "market": str(market).upper(),
-                "feature_time": selected.index,
-                "label_end_time": label_end_time,
-            },
-            index=selected.index,
-        )
-
-        item = pd.concat(
-            [selected, metadata],
-            axis=1,
-            copy=False,
-        )
+        item = selected
+        item["target_forward_return"] = forward_return
+        item["target_net_return"] = net_return
+        item["target_mae"] = mae
+        item["target_mfe"] = mfe
+        item["target_path_quality"] = path_quality
+        item["target_alpha"] = (net_return > 0.0).astype(float)
+        item["target_regime_persistence"] = regime_persistence.astype(float)
+        item["market"] = str(market).upper()
+        item["feature_time"] = item.index
+        item["label_end_time"] = item.index.to_series().shift(-horizon)
         item = item.iloc[:-horizon] if len(item) > horizon else item.iloc[0:0]
         target_columns = [
             "target_forward_return",
@@ -220,20 +184,18 @@ def build_agent_dataset(
     if (label_end <= feature_time).any():
         raise ValueError("labels are not strictly future-only")
     identity = pd.util.hash_pandas_object(
-        frame[
-            [
-                *features,
-                "target_forward_return",
-                "target_net_return",
-                "target_mae",
-                "target_mfe",
-                "target_path_quality",
-                "target_regime_persistence",
-                "market",
-                "feature_time",
-                "label_end_time",
-            ]
-        ],
+        frame[[
+            *features,
+            "target_forward_return",
+            "target_net_return",
+            "target_mae",
+            "target_mfe",
+            "target_path_quality",
+            "target_regime_persistence",
+            "market",
+            "feature_time",
+            "label_end_time",
+        ]],
         index=False,
     ).to_numpy()
     digest = sha256(identity.tobytes()).hexdigest()
@@ -246,7 +208,6 @@ def build_agent_dataset(
         time_end=pd.Timestamp(feature_time.max()).isoformat(),
         markets=tuple(sorted(frame["market"].unique())),
     )
-
 
 def purged_chronological_split(
     dataset: AgentDataset,

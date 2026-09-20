@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from crypto_ai_swing.bridge.crypto_library import CryptoLibraryBridge
+from crypto_ai_swing.intelligence.cmc_startup_bridge import CMCStartupBridge
 
 
 def _num(value: Any) -> float | None:
@@ -62,9 +63,7 @@ class CMCContextCollector:
         native = self.crypto.settings()
         providers = getattr(native, "providers", None)
         return _secret(
-            getattr(providers, "coinmarketcap_api_key", None)
-            if providers is not None
-            else None
+            getattr(providers, "coinmarketcap_api_key", None) if providers is not None else None
         )
 
     @staticmethod
@@ -114,9 +113,7 @@ class CMCContextCollector:
             raise RuntimeError("CMC_NON_OBJECT_RESPONSE")
         status = payload.get("status") or {}
         if str(status.get("error_code", 0)) not in {"0", "None"}:
-            raise RuntimeError(
-                f"CMC_{status.get('error_code')}:{status.get('error_message')}"
-            )
+            raise RuntimeError(f"CMC_{status.get('error_code')}:{status.get('error_message')}")
         return payload
 
     def _cached(
@@ -173,9 +170,7 @@ class CMCContextCollector:
             out[f"positive_fraction_{label}"] = (
                 float(np.mean(np.asarray(values) > 0.0)) if values else None
             )
-            out[f"median_change_{label}"] = (
-                float(np.median(values)) if values else None
-            )
+            out[f"median_change_{label}"] = float(np.median(values)) if values else None
         return out
 
     @staticmethod
@@ -330,11 +325,72 @@ class CMCContextCollector:
             if str(row.get("market")).upper() in requested
         }
 
+        startup_intelligence: dict[str, Any]
+        try:
+            startup_module = self.crypto.import_module("data.cmc_startup_intelligence")
+            startup_service = startup_module.CMCStartupIntelligence(self.crypto.settings())
+            startup_intelligence = startup_service.status()
+        except Exception as exc:
+            startup_intelligence = {
+                "status": "UNAVAILABLE",
+                "error": f"{type(exc).__name__}:{str(exc)[:220]}",
+            }
+
+        try:
+            startup_forward = CMCStartupBridge(self.settings).forward_features(markets)
+
+            for market, forward in dict(startup_forward.get("markets") or {}).items():
+                market = str(market).upper()
+
+                target = assets.setdefault(
+                    market,
+                    {
+                        "market": market,
+                    },
+                )
+
+                target["startup_forward"] = dict(forward.get("features") or {})
+
+                target["startup_forward_feature_count"] = int(
+                    forward.get(
+                        "source_feature_count",
+                        0,
+                    )
+                    or 0
+                )
+
+                target["startup_forward_status"] = forward.get("status")
+
+        except Exception as exc:  # noqa: BLE001
+            startup_forward = {
+                "status": "UNAVAILABLE",
+                "error": (f"{type(exc).__name__}:{str(exc)[:220]}"),
+                "global_features": {},
+                "global_feature_count": 0,
+                "markets": {},
+            }
+
         output = {
-            "schema_version": "crypto_ai_swing_cmc_context_v1",
+            "schema_version": "crypto_ai_swing_cmc_context_v2",
             "generated_at": datetime.now(UTC).isoformat(),
             "status": "READY" if not failures else "DEGRADED",
             "global_metrics": global_metrics,
+            "startup_forward_global": {
+                "status": startup_forward.get("status"),
+                "generated_at": startup_forward.get("generated_at"),
+                "feature_count": startup_forward.get(
+                    "global_feature_count",
+                    0,
+                ),
+                "features": startup_forward.get(
+                    "global_features",
+                    {},
+                ),
+                "forward_only": True,
+                "point_in_time": True,
+                "execution_authority": False,
+            },
+            "startup_intelligence": startup_intelligence,
             "fear_and_greed": self._data(fear),
             "fear_and_greed_alternative_me": alternative_fear,
             "altcoin_season": self._data(altseason),

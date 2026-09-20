@@ -9,6 +9,7 @@ import pandas as pd
 
 from crypto_ai_swing.agents.crypto_repo_signals import augment_canonical_model_features
 from crypto_ai_swing.agents.temporal_patterns import augment_temporal_pattern_features
+from crypto_ai_swing.agents.cmc_pit_features import augment_cmc_pit_features
 from crypto_ai_swing.agents.feature_denoising import (
     denoised_candidate_columns,
     select_stable_train_features,
@@ -150,7 +151,7 @@ def canonical_model_frame(
             "data_provenance": {
                 "source_type": "REAL_PROVIDER_DATA",
                 "synthetic_data_used": False,
-                "historical_context_policy": "TECHNICAL_OHLCV_ONLY",
+                "historical_context_policy": "TECHNICAL_OHLCV_PLUS_TRUE_HISTORICAL_CMC_PIT",
             },
         }
     )
@@ -184,6 +185,14 @@ def canonical_model_frame(
         timeframe=tf,
     )
     features = augment_temporal_pattern_features(features)
+    # Only TRUE_HISTORICAL_SOURCE CMC rows with available_at <= bar time are
+    # eligible here. Current DEX/derivatives/news/WebSocket context remains
+    # forward-only and cannot be backfilled into model training.
+    features = augment_cmc_pit_features(
+        bridge,
+        features,
+        market=str(market).upper(),
+    )
     out = _numeric_frame(features)
     out.attrs.update(
         {

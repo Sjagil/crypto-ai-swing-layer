@@ -176,7 +176,8 @@ class ContinuousLearningWorker:
             "continuous_hpo": True,
             "continuous_backtesting": True,
             "qualified_models_have_live_influence": True,
-            "execution_authority_owned_by_pi": True,
+            "execution_authority_owned_by_pi": False,
+            "execution_authority_owner": "Sjagil/crypto canonical execution gate",
         }
         self._atomic(self.heartbeat_path, payload)
         if errors:
