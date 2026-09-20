@@ -10,7 +10,7 @@ User=pi
 Group=pi
 WorkingDirectory=/home/pi/sjagil/crypto
 Environment=PYTHONUNBUFFERED=1
-Environment=CMC_STARTUP_ROOT=/mnt/data/crypto/cmc-startup
+Environment=CMC_STARTUP_ROOT=/mnt/data/quantdata/cmc-startup
 Environment=CRYPTO_SWING_PRODUCTION_MODE=shadow
 Environment=CRYPTO_SWING_CANARY_EXECUTE=NO
 Environment=CRYPTO_SWING_FULL_LIVE=NO

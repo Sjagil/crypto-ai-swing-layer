@@ -23,7 +23,8 @@ export CRYPTO_FULL_LIVE=NO
   "$SWING/src/crypto_ai_swing/intelligence/cmc_startup_bridge.py" \
   "$SWING/src/crypto_ai_swing/research/cmc_feature_research.py" \
   "$SWING/src/crypto_ai_swing/orchestration/pi_learning_worker.py" \
-  "$SWING/scripts/pi_learning_worker.py"
+  "$SWING/scripts/pi_learning_worker.py" \
+  "$SWING/scripts/cmc_websocket_10.py"
 
 sudo install -m 0644 "$SWING/deploy/crypto-cmc-intelligence.service" /etc/systemd/system/crypto-cmc-intelligence.service
 sudo install -m 0644 "$SWING/deploy/crypto-cmc-websocket.service" /etc/systemd/system/crypto-cmc-websocket.service
