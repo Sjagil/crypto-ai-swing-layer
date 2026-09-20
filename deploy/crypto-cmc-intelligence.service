@@ -1,0 +1,34 @@
+[Unit]
+Description=CoinMarketCap Startup Intelligence Collector
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sjagil/crypto
+Environment=PYTHONUNBUFFERED=1
+Environment=CMC_STARTUP_ROOT=/mnt/data/quantdata/cmc-startup
+Environment=CRYPTO_SWING_PRODUCTION_MODE=shadow
+Environment=CRYPTO_SWING_CANARY_EXECUTE=NO
+Environment=CRYPTO_SWING_FULL_LIVE=NO
+Environment=CRYPTO_FULL_LIVE=NO
+ExecStart=/home/pi/sjagil/crypto-ai-swing-layer/.venv/bin/python /home/pi/sjagil/crypto/scripts/cmc_startup_intelligence.py --markets-file /home/pi/sjagil/crypto-ai-swing-layer/output/crypto_ai_swing/universe/latest.json daemon --refresh-seconds 300 --daily-history-seconds 21600
+Restart=always
+RestartSec=15
+TimeoutStopSec=60
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=80%
+MemoryHigh=1G
+MemoryMax=2G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/pi/sjagil/crypto/data_store /home/pi/sjagil/crypto/output /home/pi/sjagil/crypto-ai-swing-layer/output /mnt/data
+
+[Install]
+WantedBy=multi-user.target

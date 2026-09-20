@@ -1,0 +1,38 @@
+name: round43-public-research-audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 */6 * * *"
+
+jobs:
+  stateless-research-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Checkout pinned canonical crypto
+        shell: bash
+        run: |
+          CRYPTO_COMMIT="$(python -c 'import json; print(json.load(open("config/canonical_crypto_engine.json"))["commit"])')"
+          git clone --quiet https://github.com/Sjagil/crypto.git "$GITHUB_WORKSPACE/crypto"
+          git -C "$GITHUB_WORKSPACE/crypto" checkout --quiet "$CRYPTO_COMMIT"
+          echo "CRYPTO_REPO_PATH=$GITHUB_WORKSPACE/crypto" >> "$GITHUB_ENV"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,crypto-runtime]'
+          python -m playwright install chromium
+      - name: Stateless public research audit
+        run: |
+          python scripts/round42_strategy_cycle.py --force
+          python scripts/round42_browser_research.py
+          python scripts/round43_status.py --compact
+      - name: Safety statement
+        run: |
+          echo "This runner is stateless and is not persistent prospective evidence."
+          echo "No live authority or automatic live promotion is granted."

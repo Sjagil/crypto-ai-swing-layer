@@ -2,14 +2,14 @@ schema: crypto_ai_swing_agents_v4
 enabled: true
 training_markets: []
 training_market_source: runtime_universe_25
-timeframe: 1h
-horizon_bars: 4
+timeframe: 15m
+horizon_bars: 16
 minimum_rows: 8000
 minimum_net_move_bps: 65.0
 artifact_status_after_training: SHADOW
 shadow_decision_requires_oos_qualification: true
-live_decision_influence: false
-automatic_canary_promotion: false
+live_decision_influence: true
+automatic_canary_promotion: true
 automatic_active_promotion: false
 qualification:
   minimum_validation_selected: 40
@@ -31,6 +31,37 @@ qualification:
   stochastic_simulations: 10000
   historical_trial_floor: 33
   require_point_in_time_universe_for_alpha: true
+multitimeframe:
+  enabled: true
+  version: round47h1_canonical_mtf_v1
+  base_timeframe: 15m
+  required_context_timeframes:
+  - 1h
+  - 2h
+  - 4h
+  - 1d
+  optional_context_timeframes:
+  - 1w
+  minimum_base_rows_per_market: 8000
+  minimum_training_markets: 12
+  maximum_context_features_per_timeframe: 36
+  candidate_maximum_features: 256
+  supervised_maximum_features: 128
+  primary_horizon_hours: 4.0
+  maximum_required_context_age_bars: 1.25
+  minimum_selected_per_required_timeframe: 3
+  minimum_selected_cross_timeframe: 4
+  alignment: CLOSED_CANDLE_BACKWARD_ASOF
+  tactical_catalogue_integration: true
+  fail_closed_runtime_context: true
+label_noise:
+  enabled: true
+  boundary_band_fraction_of_cost: 0.25
+  minimum_band_bps: 10.0
+  maximum_band_bps: 30.0
+  minimum_confidence: 0.05
+  confidence_power: 1.35
+  fallback_min_weight: 0.25
 calibration:
   methods:
   - raw
@@ -43,20 +74,25 @@ rl:
   long_only: true
   leverage: false
   shorting: false
-  live_decision_influence: false
-  timeframe: 1h
-  total_timesteps: 50000
-  minimum_rows_per_market: 900
+  live_decision_influence: true
+  timeframe: 15m
+  total_timesteps: 120000
+  minimum_rows_per_market: 8000
   retrain_seconds: 86400
   spot_only: true
   shadow_signal_influence: true
-  automatic_live_promotion: false
+  automatic_live_promotion: true
   candidate_seeds:
   - 17
   - 29
   - 43
   validation_fraction: 0.2
   final_test_fraction: 0.2
+  minimum_hold_bars: 24
+  cooldown_bars: 8
+  minimum_hold_hours: 6
+  cooldown_hours: 2
+  reward_version: swing_cost_aware_incremental_drawdown_v1
 research_agent_panel:
   enabled: true
   authority: ADVISORY_ONLY
@@ -104,3 +140,77 @@ edge_manager:
   minimum_profit_factor: 1.2
   minimum_payoff_ratio: 1.1
   require_swing_geometry: true
+manager:
+  enabled: true
+  check_seconds: 60
+  supervised_retrain_seconds: 14400
+  rl_retrain_seconds: 86400
+  edge_refresh_seconds: 900
+  registry_refresh_seconds: 3600
+  stale_lock_seconds: 21600
+  retrain_missing_or_expired_immediately: true
+  continuous_monitoring: true
+  live_decision_influence: true
+  automatic_live_authority: false
+  automatic_model_live_promotion: true
+hpo:
+  enabled: true
+  rl_enabled: true
+  backprop_mlp_enabled: true
+  seed: 43
+  fetch_concurrency: 4
+  maximum_features: 128
+  rl_maximum_features: 80
+  timeout_seconds_per_head: 1200
+  rl_timeout_seconds: 5400
+  rl_trial_timesteps: 25000
+  rl_trials_per_run: 10
+  maximum_state_age_hours: 168
+  trials_per_run:
+    alpha: 20
+    regime: 16
+    return: 20
+    risk: 12
+correlation:
+  window: 90
+  minimum_samples: 30
+  cluster_threshold: 0.75
+  maximum_correlated_exposure_fraction: 0.35
+  large_position_threshold: 0.1
+live_promotion:
+  enabled: true
+  supervised_enabled: true
+  rl_enabled: true
+  minimum_supervised_rows: 8000
+  minimum_promotion_score_delta: 1.0e-06
+  minimum_rl_promotion_score_delta: 1.0e-06
+  promotion_status: LIVE_QUALIFIED
+  model_influence_only: true
+  may_grant_execution_authority: false
+  may_change_capital_caps: false
+continuous_learning:
+  enabled: true
+  cycle_seconds: 60
+  hpo_refresh_seconds: 43200
+  rl_hpo_refresh_seconds: 86400
+  continuous_data_consumption: true
+  continuous_backtesting: true
+  continuous_model_training: true
+  qualified_models_have_live_influence: true
+  continuous_data_collection: true
+  automatic_model_live_promotion: true
+  factory_refresh_seconds: 21600
+  factory_maximum_rows: 50000
+  cmc_feature_research_seconds: 21600
+  cmc_feature_research_timeframe: 1d
+  cmc_feature_research_horizon_bars: 7
+tcn_gru:
+  enabled: true
+  role: continuous_challenger
+  timeframe: 1h
+  horizon_bars: 4
+  lookback: 64
+  retrain_seconds: 21600
+  minimum_rows: 8000
+  automatic_live_promotion: true
+  live_decision_influence_requires_qualification: true

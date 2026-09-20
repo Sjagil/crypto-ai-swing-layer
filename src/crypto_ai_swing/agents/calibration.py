@@ -103,40 +103,145 @@ def purged_calibration_selection_split(
     horizon_bars: int,
     calibration_fraction: float = 0.50,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Chronologically separate calibrator fitting from model/threshold selection.
+    """
+    Chronologically separate calibrator fitting from model/threshold selection.
+
+    Uses both a bar-count purge and, when available, the actual label_end_time
+    so calibration labels can never extend into the selection period.
+    """
     if validation.empty:
-        raise ValueError("validation frame is empty")
-    fraction = float(calibration_fraction)
+        raise ValueError(
+            "validation frame is empty"
+        )
+
+    fraction = float(
+        calibration_fraction
+    )
     if not 0.25 <= fraction <= 0.75:
-        raise ValueError("calibration_fraction must be between 0.25 and 0.75")
+        raise ValueError(
+            "calibration_fraction must be between 0.25 and 0.75"
+        )
+
+    feature_time = pd.to_datetime(
+        validation["feature_time"],
+        utc=True,
+    )
 
     times = pd.DatetimeIndex(
-        pd.to_datetime(validation["feature_time"], utc=True)
+        feature_time
         .drop_duplicates()
         .sort_values()
     )
-    if len(times) < 20:
-        raise ValueError("insufficient validation timestamps for calibration split")
 
-    cut = max(1, min(len(times) - 1, int(len(times) * fraction)))
-    purge = max(1, int(horizon_bars))
-    calibration_end = max(1, cut - purge)
-    calibration_times = set(times[:calibration_end])
-    selection_times = set(times[cut:])
+    if len(times) < 20:
+        raise ValueError(
+            "insufficient validation timestamps for calibration split"
+        )
+
+    cut = max(
+        1,
+        min(
+            len(times) - 1,
+            int(len(times) * fraction),
+        ),
+    )
+
+    purge = max(
+        1,
+        int(horizon_bars),
+    )
+
+    calibration_end = max(
+        1,
+        cut - purge,
+    )
+
+    calibration_times = set(
+        times[:calibration_end]
+    )
+    selection_times = set(
+        times[cut:]
+    )
 
     calibration = validation[
-        pd.to_datetime(validation["feature_time"], utc=True).isin(calibration_times)
-    ].copy()
-    selection = validation[
-        pd.to_datetime(validation["feature_time"], utc=True).isin(selection_times)
+        feature_time.isin(
+            calibration_times
+        )
     ].copy()
 
-    if len(calibration) < 100 or len(selection) < 100:
-        raise ValueError(
-            "calibration/selection split requires at least 100 rows per segment"
+    selection = validation[
+        feature_time.isin(
+            selection_times
         )
-    if calibration["target_alpha"].nunique() < 2:
-        raise ValueError("calibration segment has one alpha class")
-    if selection["target_alpha"].nunique() < 2:
-        raise ValueError("selection segment has one alpha class")
+    ].copy()
+
+    if calibration.empty or selection.empty:
+        raise ValueError(
+            "calibration/selection split produced empty partition"
+        )
+
+    selection_start_time = pd.Timestamp(
+        pd.to_datetime(
+            selection["feature_time"],
+            utc=True,
+        ).min()
+    )
+
+    # Production AgentDataset always supplies label_end_time.
+    # Use it instead of assuming N global timestamps equal N market bars.
+    if "label_end_time" in calibration.columns:
+        calibration_label_end = pd.to_datetime(
+            calibration["label_end_time"],
+            utc=True,
+        )
+
+        calibration = calibration.loc[
+            calibration_label_end
+            < selection_start_time
+        ].copy()
+
+    if (
+        len(calibration) < 100
+        or len(selection) < 100
+    ):
+        raise ValueError(
+            "calibration/selection split requires at least "
+            "100 rows per segment after label-aware purge"
+        )
+
+    if (
+        "label_end_time" in calibration.columns
+        and pd.Timestamp(
+            pd.to_datetime(
+                calibration["label_end_time"],
+                utc=True,
+            ).max()
+        )
+        >= pd.Timestamp(
+            pd.to_datetime(
+                selection["feature_time"],
+                utc=True,
+            ).min()
+        )
+    ):
+        raise ValueError(
+            "calibration labels overlap selection after label-aware purge"
+        )
+
+    if (
+        calibration["target_alpha"].nunique()
+        < 2
+    ):
+        raise ValueError(
+            "calibration segment has one alpha class"
+        )
+
+    if (
+        selection["target_alpha"].nunique()
+        < 2
+    ):
+        raise ValueError(
+            "selection segment has one alpha class"
+        )
+
     return calibration, selection

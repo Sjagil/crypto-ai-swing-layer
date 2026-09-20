@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import os
 import sys
 import time
 
@@ -42,6 +43,7 @@ REQUIRED_CRYPTO_MODULES: tuple[str, ...] = (
     "data.data_loader",
     "data.database",
     "data.websocket_manager",
+    "data.bitvavo_market_data_pro",
     "data.orderflow_recorder",
     "data.orderbook_l2",
     "data.bitvavo_l2_reconstruction_v2",
@@ -63,6 +65,11 @@ REQUIRED_CRYPTO_MODULES: tuple[str, ...] = (
     "execution.execution",
     "execution.bitvavo_private_errors",
     "reporting.reference_integration_health",
+    "research.indicator_registry",
+    "research.strategies",
+    "research.tactical_multitimeframe",
+    "research.macro_context",
+    "core.active_trading",
     "research.features",
     "research.research_factory",
     "scrapers.rss",
@@ -488,6 +495,183 @@ class CryptoLibraryBridge:
             "ask_levels": len(CryptoLibraryBridge._book_levels(bundle.orderbook, "asks")),
             "microstructure": dict(bundle.microstructure),
         }
+
+    @staticmethod
+    def _historical_timeframe(timeframe: str) -> str:
+        token = str(timeframe)
+        return "1W" if token.lower() == "1w" else token
+
+    def historical_path(
+        self,
+        market: str,
+        timeframe: str,
+        *,
+        provider: str = "bitvavo",
+    ) -> Path:
+        settings = self.settings()
+        market = str(market).upper()
+        timeframe = self._historical_timeframe(timeframe)
+
+        historical_root = os.getenv(
+            "CRYPTO_SWING_HISTORICAL_DATA_ROOT",
+            "",
+        ).strip()
+
+        processed = (
+            Path(historical_root).expanduser().resolve()
+            if historical_root
+            else Path(settings.paths.processed_data_dir)
+        )
+
+        candidates = (
+            processed / f"{market}_{timeframe}.parquet",
+            processed / str(provider).lower() / market / f"{timeframe}.parquet",
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        raise FileNotFoundError(
+            "historical OHLCV unavailable: "
+            + " | ".join(str(v) for v in candidates)
+        )
+
+    @staticmethod
+    def _historical_frame(path: Path) -> pd.DataFrame:
+        frame = pd.read_parquet(path)
+        if frame is None or frame.empty:
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume"]
+            )
+
+        if "closed" in frame.columns:
+            mask = frame["closed"].map(
+                lambda value: (
+                    value is not False
+                    and str(value).strip().lower()
+                    not in {"false", "0", "no"}
+                )
+            )
+            frame = frame.loc[mask].copy()
+
+        if "values" in frame.columns:
+            def as_mapping(value):
+                if isinstance(value, Mapping):
+                    return dict(value)
+                as_py = getattr(value, "as_py", None)
+                if callable(as_py):
+                    raw = as_py()
+                    return dict(raw) if isinstance(raw, Mapping) else {}
+                return {}
+
+            unpacked = frame["values"].map(as_mapping)
+            for name in ("open", "high", "low", "close", "volume"):
+                if name not in frame.columns:
+                    frame[name] = unpacked.map(
+                        lambda row, key=name: row.get(key)
+                    )
+
+        if "timestamp" in frame.columns:
+            index = pd.to_datetime(
+                frame["timestamp"], utc=True, errors="coerce"
+            )
+        elif isinstance(frame.index, pd.DatetimeIndex):
+            index = pd.to_datetime(
+                frame.index, utc=True, errors="coerce"
+            )
+        else:
+            source = next(
+                (
+                    name
+                    for name in ("open_time", "datetime", "time")
+                    if name in frame.columns
+                ),
+                None,
+            )
+            if source is None:
+                raise CryptoLibraryError(
+                    f"historical dataset has no timestamp column: {path}"
+                )
+            index = pd.to_datetime(
+                frame[source], utc=True, errors="coerce"
+            )
+
+        required = {"open", "high", "low", "close"}
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise CryptoLibraryError(
+                f"historical dataset missing OHLC columns {missing}: {path}"
+            )
+
+        if "volume" not in frame.columns:
+            frame["volume"] = 0.0
+
+        output = frame[
+            ["open", "high", "low", "close", "volume"]
+        ].copy()
+        output.index = pd.DatetimeIndex(index)
+        output = output.loc[~output.index.isna()]
+
+        for name in output.columns:
+            output[name] = pd.to_numeric(
+                output[name], errors="coerce"
+            )
+
+        output = output.dropna(
+            subset=["open", "high", "low", "close"]
+        )
+        output = output.loc[
+            (output["open"] > 0)
+            & (output["high"] > 0)
+            & (output["low"] > 0)
+            & (output["close"] > 0)
+        ]
+        output = output.sort_index()
+        output = output.loc[
+            ~output.index.duplicated(keep="last")
+        ].copy()
+        return output
+
+    def historical_ohlcv(
+        self,
+        market: str,
+        timeframe: str,
+        *,
+        provider: str = "bitvavo",
+    ) -> pd.DataFrame:
+        path = self.historical_path(
+            market, timeframe, provider=provider
+        )
+        frame = self._historical_frame(path)
+        frame.attrs.update(
+            {
+                "market": str(market).upper(),
+                "timeframe": str(timeframe),
+                "provider": str(provider).lower(),
+                "historical": True,
+                "source_path": str(path),
+            }
+        )
+        return frame
+
+    def historical_ohlcv_many(
+        self,
+        markets: Iterable[str],
+        timeframe: str,
+        *,
+        provider: str = "bitvavo",
+    ) -> dict[str, pd.DataFrame]:
+        result: dict[str, pd.DataFrame] = {}
+        for raw_market in markets:
+            market = str(raw_market).upper()
+            try:
+                result[market] = self.historical_ohlcv(
+                    market, timeframe, provider=provider
+                )
+            except (FileNotFoundError, CryptoLibraryError):
+                result[market] = pd.DataFrame(
+                    columns=["open", "high", "low", "close", "volume"]
+                )
+        return result
 
     @staticmethod
     def _lookback_hours(timeframe: str) -> int:

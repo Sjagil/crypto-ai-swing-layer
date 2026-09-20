@@ -48,6 +48,7 @@ trap cleanup EXIT INT TERM
 
 export CRYPTO_REPO_PATH="$CRYPTO_ROOT"
 export PYTHONUNBUFFERED=1
+export HF_HOME="${HF_HOME:-$HOME/Library/Caches/huggingface}"
 
 cd "$ROOT"
 

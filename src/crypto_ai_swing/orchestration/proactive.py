@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -12,9 +13,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from crypto_ai_swing.agents.runtime import AgentRuntime
-from crypto_ai_swing.agents.rl_runtime import RLRuntime
+from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
 from crypto_ai_swing.agents.edge_manager import ResearchEdgeManager
+from crypto_ai_swing.agents.rl_runtime import RLRuntime
+from crypto_ai_swing.agents.runtime import AgentRuntime
+from crypto_ai_swing.models.adaptive_model_averaging import (
+    ModelVote,
+    blend_probabilities,
+)
+from crypto_ai_swing.models.tcn_gru_runtime import TCNGRURuntime
 from crypto_ai_swing.bridge.crypto_library import (
     CryptoLibraryBridge,
 )
@@ -23,13 +30,10 @@ from crypto_ai_swing.execution.active_swing_canary import (
     canonical_preflight_explicitly_denied,
     execution_validation_canary_config,
 )
-from crypto_ai_swing.execution.bitvavo import (
-    BitvavoError,
-    BitvavoREST,
-)
 from crypto_ai_swing.execution.crypto_authority import CryptoAuthorityAdapter
-from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.cmc_context import CMCContextCollector
+from crypto_ai_swing.intelligence.comprehensive import ComprehensiveIntelligenceEngine
+from crypto_ai_swing.intelligence.crypto_news import CryptoNewsCollector
 from crypto_ai_swing.intelligence.technical import (
     multi_timeframe_snapshot,
     technical_snapshot,
@@ -39,21 +43,23 @@ from crypto_ai_swing.nlp.sources import (
     discover_crypto_repo_documents,
     fetch_rss_documents,
 )
+from crypto_ai_swing.orchestration.mtf_challenger import evaluate_mtf_challenger
 from crypto_ai_swing.orchestration.pipeline import SwingPipeline
 from crypto_ai_swing.orchestration.rally_capture import (
     assess_rally,
     macro_override_allowed,
 )
 from crypto_ai_swing.orchestration.timeframe_pipeline import evaluate_timeframe_pipeline
-from crypto_ai_swing.orchestration.mtf_challenger import evaluate_mtf_challenger
+from crypto_ai_swing.production.guard import LiveExecutionGuard
 from crypto_ai_swing.quant.bayesian_forward import (
     build_bayesian_forward_snapshot,
+)
+from crypto_ai_swing.quant.bayesian_forward import (
     persist as persist_bayesian_forward,
 )
 from crypto_ai_swing.research.forward import ForwardEvidenceLedger
+from crypto_ai_swing.research.strategy_challenger import StrategyChallengerLab
 from crypto_ai_swing.universe.runtime import UniverseManager, screen_frame
-from crypto_ai_swing.accounting.paper_ledger import PaperPortfolioLedger
-from crypto_ai_swing.production.guard import LiveExecutionGuard
 
 
 @dataclass(frozen=True)
@@ -223,11 +229,8 @@ class ProactiveTrader:
         )
         self.nlp = NLPMarketEngine(settings.nlp)
         self.crypto = CryptoLibraryBridge(settings.crypto_repo_root)
-        # Direct REST is retained only for the already-existing private
-        # account preflight/bootstrap. Round 2 market data is sourced from
-        # Sjagil/crypto. Live order submission is intentionally disabled
-        # until core.execution_authority is mapped exactly.
-        self.client = BitvavoREST()
+        # Exchange/account truth is owned by Sjagil/crypto.
+        # No Bitvavo transport is instantiated in the swing application.
         news_cfg = settings.autonomy.get("news", {}) if hasattr(settings, "autonomy") else {}
         self.news_collector = CryptoNewsCollector(
             self.crypto,
@@ -247,9 +250,16 @@ class ProactiveTrader:
             decision_bucket_minutes=int(forward_cfg.get("decision_bucket_minutes", 15)),
         )
         self.agents = AgentRuntime(settings, mode=self.mode)
-        self.rl = RLRuntime(settings)
+        self.tcn_gru = TCNGRURuntime(settings, mode=self.mode)
+        self.rl = RLRuntime(settings, mode=self.mode)
         self.cmc_context = CMCContextCollector(settings)
+        self.round44 = ComprehensiveIntelligenceEngine(settings)
         self.edge_manager = ResearchEdgeManager(settings, mode=self.mode)
+        self.strategy_lab = StrategyChallengerLab(
+            settings,
+            mode="shadow" if self.mode == "live" else self.mode,
+        )
+        self.edge_manager.strategy_lab = self.strategy_lab
         self.execution_authority = CryptoAuthorityAdapter(settings.crypto_repo_root)
         self.production_guard = LiveExecutionGuard(
             settings, self.execution_authority
@@ -265,7 +275,6 @@ class ProactiveTrader:
     def close(self):
         self.state.close()
         self.forward.close()
-        self.client.close()
         guard = getattr(self, "production_guard", None)
         if guard is not None:
             guard.close()
@@ -301,7 +310,7 @@ class ProactiveTrader:
         return fallback, fallback, Decimal(0)
 
     def _paper_fee_bps(self) -> Decimal:
-        costs = dict((self.settings.execution.get("costs", {}) or {}))
+        costs = dict(self.settings.execution.get("costs", {}) or {})
         return Decimal(str(costs.get("fee_bps_per_side", 25.0)))
 
     def _paper_mark_prices(self, positions) -> dict[str, Decimal]:
@@ -374,87 +383,40 @@ class ProactiveTrader:
     def _account(
         self, markets: list[str]
     ) -> tuple[Decimal, Decimal, Decimal]:
-        if self.mode == "live":
-            authority = getattr(self, "execution_authority", None)
-            if authority is not None:
-                try:
-                    snapshot = authority.account_snapshot(markets)
-                except BitvavoError:
-                    raise
-                except Exception as exc:
-                    raise BitvavoError(
-                        "Canonical crypto account snapshot unavailable: "
-                        f"{type(exc).__name__}: {str(exc)[:300]}"
-                    ) from exc
-                if snapshot.get("status") != "READY":
-                    raise BitvavoError(
-                        "Canonical crypto account health is not READY: "
-                        + ",".join(
-                            str(x) for x in snapshot.get("failures", [])
-                        )
-                    )
-                return (
-                    Decimal(str(snapshot.get("equity_eur") or "0")),
-                    Decimal(str(snapshot.get("cash_eur") or "0")),
-                    Decimal(str(snapshot.get("exposure_eur") or "0")),
-                )
-            # Compatibility/fail-closed path for tests or partially
-            # constructed instances. Production __init__ installs the native
-            # execution authority adapter.
         if not self._private_account_enabled():
             if self.mode in {"shadow", "paper"}:
                 return self._simulated_portfolio_account()
             return self._fallback_account()
-        if not self.client.api_key or not self.client.api_secret:
+
+        authority = getattr(self, "execution_authority", None)
+        if authority is None:
             if self.mode == "live":
-                raise BitvavoError(
-                    "Private Bitvavo credentials are required in live mode"
-                )
-            return self._fallback_account()
+                raise RuntimeError("CANONICAL_CRYPTO_ACCOUNT_AUTHORITY_MISSING")
+            return self._simulated_portfolio_account()
+
         try:
-            balances = self.client.balances()
-        except BitvavoError:
+            snapshot = authority.account_snapshot(markets)
+        except Exception as exc:
             if self.mode == "live":
-                raise
-            return self._fallback_account()
-        by_symbol = {
-            str(x.get("symbol")): (
-                Decimal(str(x.get("available", "0")))
-                + Decimal(str(x.get("inOrder", "0")))
-            )
-            for x in balances
-        }
-        cash = by_symbol.get("EUR", Decimal(0))
-        equity = cash
-        exposure = Decimal(0)
-        for market in markets:
-            base = market.split("-", 1)[0]
-            amount = by_symbol.get(base, Decimal(0))
-            if amount <= 0:
-                continue
-            try:
-                bundle = self.crypto.market_bundle(
-                    market,
-                    "1h",
-                    mode=self.mode,
-                    persist=False,
-                    depth=5,
-                )
-                price = Decimal(
-                    str(bundle.microstructure.get("best_bid") or "0")
-                )
-            except Exception:
-                price = Decimal(0)
-            value = amount * price
-            equity += value
-            exposure += value
-        if equity <= 0:
+                raise RuntimeError(
+                    "Canonical crypto account snapshot unavailable: "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                ) from exc
+            return self._simulated_portfolio_account()
+
+        if snapshot.get("status") != "READY":
             if self.mode == "live":
-                raise BitvavoError(
-                    "Authenticated Bitvavo account returned no usable equity"
+                raise RuntimeError(
+                    "Canonical crypto account health is not READY: "
+                    + ",".join(str(v) for v in snapshot.get("failures", []))
                 )
-            return self._fallback_account()
-        return equity, cash, exposure
+            return self._simulated_portfolio_account()
+
+        return (
+            Decimal(str(snapshot.get("equity_eur") or "0")),
+            Decimal(str(snapshot.get("cash_eur") or "0")),
+            Decimal(str(snapshot.get("exposure_eur") or "0")),
+        )
 
     def _news(self):
         now = time.time()
@@ -509,7 +471,7 @@ class ProactiveTrader:
             try:
                 amount = Decimal(str(fill.get("amount", "0")))
                 price = Decimal(str(fill.get("price", "0")))
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             total_amount += amount
             total_quote += amount * price
@@ -558,7 +520,7 @@ class ProactiveTrader:
                     "reason_code": "SIMULATED_ACCOUNT_RECONCILIATION_REQUIRED",
                     "intent_id": intent.intent_id,
                 }
-            fee_fraction = self._paper_fee_bps() / Decimal("10000")
+            fee_fraction = self._paper_fee_bps() / Decimal(10000)
             required_cash = intent.notional_eur * (Decimal(1) + fee_fraction)
             if cash_now < required_cash:
                 return {
@@ -571,7 +533,7 @@ class ProactiveTrader:
                     "available_cash_eur": str(cash_now),
                     "intent_id": intent.intent_id,
                 }
-            portfolio_cfg = dict((self.settings.risk.get("portfolio", {}) or {}))
+            portfolio_cfg = dict(self.settings.risk.get("portfolio", {}) or {})
             max_fraction = Decimal(str(portfolio_cfg.get(
                 "max_total_exposure_fraction",
                 portfolio_cfg.get("max_exposure_fraction", 0.85),
@@ -602,12 +564,22 @@ class ProactiveTrader:
                 "execution_backend": "shadow_or_paper",
             }
         readiness = self._prospective_canary_readiness()
+        full_live = (
+            os.getenv("CRYPTO_SWING_FULL_LIVE", "")
+            .strip()
+            .upper()
+            == "YES"
+        )
         validation_canary = bool(
             (getattr(intent, "metadata", None) or {}).get(
                 "execution_validation_canary", False
             )
         )
-        if not bool(readiness.get("eligible")) and not validation_canary:
+        if (
+            not full_live
+            and not bool(readiness.get("eligible"))
+            and not validation_canary
+        ):
             return {
                 "mode": "live",
                 "accepted": False,
@@ -618,7 +590,7 @@ class ProactiveTrader:
                 "orders_submitted": 0,
             }
 
-        if validation_canary:
+        if validation_canary and not full_live:
             cfg = execution_validation_canary_config(
                 self.settings.proactive
             )
@@ -681,10 +653,19 @@ class ProactiveTrader:
             return {
                 "mode": "live",
                 "execution_backend": "Sjagil/crypto:core.swing_layer_live",
-                "execution_validation_canary": validation_canary,
-                "economic_edge_unproven": validation_canary,
+                "execution_validation_canary": (
+                    validation_canary and not full_live
+                ),
+                "full_live": full_live,
+                "economic_edge_unproven": (
+                    validation_canary and not full_live
+                ),
                 "alpha_evidence_authorized": False,
-                "autoscale_authorized": False,
+                "autoscale_authorized": bool(
+                    (getattr(intent, "metadata", None) or {}).get(
+                        "autoscale_authorized", False
+                    )
+                ),
                 "prospective_readiness": readiness,
                 "canonical_preflight": preflight,
                 **guarded,
@@ -702,7 +683,8 @@ class ProactiveTrader:
             }
 
     def _sync_live_positions(self, markets: list[str]) -> None:
-        if self.mode != "live": return
+        if self.mode != "live":
+            return
         try:
             guard = getattr(self, "production_guard", None)
             if guard is not None:
@@ -711,24 +693,26 @@ class ProactiveTrader:
                 if not bool(reconciliation.get("ready")):
                     return
             else:
-                self.execution_authority.reconcile(markets)
-            canonical = dict(
-                self.execution_authority.portfolio().get("positions") or {}
+                reconciliation = self.execution_authority.reconcile(markets)
+                if str(reconciliation.get("status") or "").upper() != "READY":
+                    return
+            rows = list(
+                dict(
+                    self.execution_authority.portfolio().get("positions")
+                    or {}
+                ).values()
             )
+            canonical_markets = {
+                str(row.get("market") or "").upper()
+                for row in rows
+                if isinstance(row, dict) and row.get("market")
+            }
         except Exception:
             return
         local = self.state.positions()
         for market in list(local):
-            if market not in canonical: self.state.delete_position(market)
-        for market,row in canonical.items():
-            try:
-                amount=Decimal(str(row.get("quantity") or "0"));entry=Decimal(str(row.get("entry_price") or "0"))
-                stop=float(row.get("stop_pct") or .02);take=float(row.get("take_profit_pct") or max(.025,3*stop))
-                trailing=float(row.get("trailing_stop_pct") or max(.008,1.2*stop))
-            except Exception: continue
-            if amount<=0 or entry<=0: continue
-            existing=local.get(market);highest=max(existing.highest_price,entry) if existing else entry
-            self.state.upsert_position(Position(market,amount,entry,highest,stop,take,trailing,str(row.get("opened_at") or datetime.now(UTC).isoformat())))
+            if market not in canonical_markets:
+                self.state.delete_position(market)
 
     def _record_simulated_position(self, intent: TradeIntent, execution: dict[str, Any], frame: pd.DataFrame) -> None:
         if self.mode == "live" or execution.get("accepted") is not True: return
@@ -755,10 +739,60 @@ class ProactiveTrader:
                         intent.estimated_round_trip_cost_bps
                     ),
                     "net_edge_bps": str(intent.net_edge_bps),
+                    "stop_pct": float(intent.stop_pct),
+                    "take_profit_pct": float(intent.take_profit_pct),
+                    "trailing_stop_pct": float(intent.trailing_stop_pct),
                     "intent_metadata": intent.metadata,
-                    "attribution_schema": "paper_intent_context_v1",
+                    "attribution_schema": "paper_intent_context_v2",
                 },
             )
+
+    def _record_position_after_execution(
+        self,
+        intent: TradeIntent,
+        execution: dict[str, Any],
+        frame: pd.DataFrame,
+    ) -> None:
+        if execution.get("accepted") is not True:
+            return
+        if self.mode != "live":
+            self._record_simulated_position(intent, execution, frame)
+            return
+        canonical = dict(execution.get("canonical_result") or execution)
+        order = dict(canonical.get("order") or {})
+        try:
+            amount = Decimal(
+                str(
+                    order.get("filled_quantity")
+                    or order.get("filledAmount")
+                    or order.get("quantity")
+                    or "0"
+                )
+            )
+            price = Decimal(
+                str(
+                    order.get("average_price")
+                    or order.get("averagePrice")
+                    or order.get("price")
+                    or frame["close"].iloc[-1]
+                )
+            )
+        except Exception:
+            return
+        if amount <= 0 or price <= 0:
+            return
+        self.state.upsert_position(
+            Position(
+                intent.market,
+                amount,
+                price,
+                price,
+                intent.stop_pct,
+                intent.take_profit_pct,
+                intent.trailing_stop_pct,
+                datetime.now(UTC).isoformat(),
+            )
+        )
 
     def _manage_exits(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -778,7 +812,7 @@ class ProactiveTrader:
                         or "0"
                     )
                 )
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             if price <= 0:
                 continue
@@ -812,6 +846,35 @@ class ProactiveTrader:
             elif highest > pos.entry_price and price <= trailing:
                 reason = "TRAILING_STOP"
             if not reason:
+                continue
+            if self.mode == "live" and reason == "STOP_LOSS":
+                try:
+                    guard = getattr(self, "production_guard", None)
+                    if guard is None:
+                        raise RuntimeError("PRODUCTION_GUARD_NOT_INITIALIZED")
+                    reconciliation = guard.reconcile(self._markets())
+                    self._last_live_reconciliation = reconciliation
+                    self._sync_live_positions([market])
+                    events.append(
+                        {
+                            "market": market,
+                            "action": "LIVE_NATIVE_STOP_MONITOR",
+                            "reason": "NATIVE_STOP_LOSS",
+                            "reconciliation": reconciliation,
+                            "duplicate_market_sell_submitted": False,
+                        }
+                    )
+                except Exception as exc:
+                    events.append(
+                        {
+                            "market": market,
+                            "action": "NATIVE_STOP_MONITOR_BLOCKED",
+                            "reason": "STOP_LOSS",
+                            "blockers": [
+                                f"{type(exc).__name__}:{str(exc)[:300]}"
+                            ],
+                        }
+                    )
                 continue
             if self.mode == "live":
                 try:
@@ -998,6 +1061,9 @@ class ProactiveTrader:
             if causal.empty:
                 skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_SCREEN_CANDLE"})
                 continue
+            causal = causal.copy()
+            causal.attrs["market"] = market
+            causal.attrs["timeframe"] = primary
             causal_primary[market] = causal
             screen_row = screen_frame(causal)
             screen_row["technical"] = technical_snapshot(
@@ -1056,7 +1122,7 @@ class ProactiveTrader:
             reverse=True,
         )
         open_markets = set(self.state.positions())
-        rally_ranked = sorted(
+        _rally_ranked = sorted(
             [
                 market
                 for market in screen
@@ -1074,8 +1140,11 @@ class ProactiveTrader:
             ),
             reverse=True,
         )
-        base_deep_markets = ranked[:deep_scan_limit]
-        rally_deep_markets = rally_ranked[:rally_scan_limit]
+        # Round43 full-universe research: every successfully screened member
+        # of the 25-market runtime universe receives full context evaluation.
+        # This expands evidence coverage; it does not force a trade.
+        base_deep_markets = list(ranked)
+        rally_deep_markets = []
         deep_markets: list[str] = []
         for market in (
             list(open_markets)
@@ -1105,6 +1174,8 @@ class ProactiveTrader:
         prospective_block = prospective_status in {"BLOCK_NEW_ENTRIES", "BLOCKED", "FAILED", "NOT_READY"}
         frames: dict[str, pd.DataFrame] = {}
         forward_frames: dict[str, pd.DataFrame] = {}
+        round44_frames: dict[str, dict[str, pd.DataFrame]] = {}
+        round44_bundles: dict[str, dict[str, Any]] = {}
 
         for market in deep_markets:
             try:
@@ -1120,6 +1191,18 @@ class ProactiveTrader:
                 mtf_frames[primary] = bundle.frame
                 decision_at = observed_at
                 causal_frames = {tf: self.crypto.causal_frame(frame, tf, decision_at) for tf, frame in mtf_frames.items()}
+                round44_frames[market] = {
+                    ("1w" if str(tf) == "1W" else str(tf)): value.copy()
+                    for tf, value in causal_frames.items()
+                    if value is not None and not value.empty
+                }
+                round44_bundles[market] = {
+                    "market": market,
+                    "ticker": dict(bundle.ticker),
+                    "trades": list(bundle.trades),
+                    "orderbook": dict(bundle.orderbook),
+                    "microstructure": dict(bundle.microstructure),
+                }
                 if causal_frames.get(primary) is None or causal_frames[primary].empty:
                     skipped.append({"market": market, "reason": "NO_CAUSAL_PRIMARY_CANDLE"})
                     continue
@@ -1220,10 +1303,44 @@ class ProactiveTrader:
                 head_influence = dict(
                     agent_decision.diagnostics.get("head_influence") or {}
                 )
-                context[market]["ml_probability"] = (
+                base_probability = (
                     agent_decision.alpha_probability
                     if head_influence.get("alpha")
                     else None
+                )
+                temporal_decision = self.tcn_gru.predict_frame(
+                    market,
+                    frame,
+                )
+                context[market]["tcn_gru"] = temporal_decision
+                ensemble = blend_probabilities(
+                    [
+                        ModelVote(
+                            "supervised",
+                            base_probability,
+                            bool(
+                                base_probability is not None
+                                and head_influence.get("alpha")
+                            ),
+                            (self.agents.status().get("metrics") or {}),
+                        ),
+                        ModelVote(
+                            "tcn_gru",
+                            temporal_decision.get("probability"),
+                            bool(
+                                temporal_decision.get("qualified")
+                                and temporal_decision.get(
+                                    "live_decision_influence",
+                                    self.mode != "live",
+                                )
+                            ),
+                            temporal_decision.get("metrics") or {},
+                        ),
+                    ]
+                )
+                context[market]["ml_ensemble"] = ensemble
+                context[market]["ml_probability"] = ensemble.get(
+                    "probability"
                 )
                 context[market]["forecast_score"] = (agent_decision.forecast_score if head_influence.get("return") else None)
                 context[market]["predicted_return"] = (agent_decision.predicted_return if head_influence.get("return") else None)
@@ -1238,13 +1355,24 @@ class ProactiveTrader:
                 context[market]["cmc"] = dict(
                     (cmc_context.get('runtime_assets') or {}).get(market) or {}
                 )
-                rl_cfg = dict((self.settings.agents.get('rl', {}) or {}))
+                rl_cfg = dict(self.settings.agents.get('rl', {}) or {})
                 context[market]["rl_score"] = (
-                    float(rl_preview['score'])
-                    if self.mode != 'live'
-                    and bool(rl_cfg.get('shadow_signal_influence', True))
-                    and bool(rl_preview.get('qualified', False))
-                    and rl_preview.get('score') is not None
+                    float(rl_preview["score"])
+                    if (
+                        (
+                            self.mode != "live"
+                            and bool(rl_cfg.get("shadow_signal_influence", True))
+                        )
+                        or (
+                            self.mode == "live"
+                            and bool(rl_cfg.get("live_decision_influence", True))
+                            and bool(
+                                rl_preview.get("live_decision_influence", False)
+                            )
+                        )
+                    )
+                    and bool(rl_preview.get("qualified", False))
+                    and rl_preview.get("score") is not None
                     else None
                 )
                 mtf_challenger = evaluate_mtf_challenger(
@@ -1276,6 +1404,30 @@ class ProactiveTrader:
             except Exception as exc:
                 skipped.append({"market": market, "reason": type(exc).__name__, "detail": str(exc)[:300]})
 
+        try:
+            round44_payload = self.round44.build(
+                markets=list(markets),
+                frames=round44_frames,
+                bundles=round44_bundles,
+                context=context,
+                cmc_context=cmc_context,
+                news=self._last_news_status,
+                observed_at=observed_at,
+            )
+        except Exception as exc:
+            round44_payload = {
+                "summary": {
+                    "schema_version": "round44_comprehensive_intelligence_v2",
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}",
+                    "automatic_live_authority": False,
+                },
+                "markets": {},
+            }
+        for market, row in dict(round44_payload.get("markets") or {}).items():
+            if market in context:
+                context[market]["round44"] = row
+
         equity, cash, exposure = self._account(markets)
         positions_for_risk = self.state.positions()
         open_risk_eur = sum(
@@ -1288,6 +1440,19 @@ class ProactiveTrader:
             Decimal(0),
         )
         authority = Authority.LIVE if self.mode == "live" else Authority.PAPER if self.mode == "paper" else Authority.SHADOW
+        portfolio_positions = [
+            {
+                "market": pos.market,
+                "amount": pos.amount,
+                "entry_price": pos.entry_price,
+                "open_risk_eur": (
+                    pos.amount
+                    * pos.entry_price
+                    * Decimal(str(pos.stop_pct))
+                ),
+            }
+            for pos in positions_for_risk.values()
+        ]
         result = SwingPipeline(self.settings).run(
             frames,
             equity_eur=equity,
@@ -1297,6 +1462,7 @@ class ProactiveTrader:
             spread_bps=spreads,
             market_context=context,
             authority=authority,
+            portfolio_positions=portfolio_positions,
         )
 
         executions = []
@@ -1332,7 +1498,7 @@ class ProactiveTrader:
             execution = self._execute_buy(intent)
             self.state.mark(intent.market, candle_ts, "BUY", {"intent": intent.to_dict(), "execution": execution})
             executions.append({"intent": intent.to_dict(), "execution": execution})
-            self._record_simulated_position(intent, execution, frame)
+            self._record_position_after_execution(intent, execution, frame)
             if (
                 execution.get("accepted") is True
                 and intent.market not in positions_for_execution
@@ -1383,6 +1549,7 @@ class ProactiveTrader:
             "rally_deep_scan_markets": rally_deep_markets,
             "screen": screen,
             "cmc_context": cmc_context,
+            "round44_comprehensive": round44_payload.get("summary", {}),
             "edge_policy": edge_policy,
             "full_universe_agent_inference": {
                 "market_count": sum(bool(row.get("agent_preview")) for row in screen.values()),
@@ -1440,14 +1607,102 @@ class ProactiveTrader:
         forward_cfg = self.settings.autonomy.get("forward_evidence", {}) if hasattr(self.settings, "autonomy") else {}
         should_record = bool(forward_cfg.get("enabled", True)) and bool(forward_cfg.get(f"record_{self.mode}", True))
         if should_record:
-            payload["forward_evidence"] = self.forward.append_cycle(payload, candle_times)
+            # Preserve actual trading signals in payload["signals"], but build a
+            # research-only evidence view containing one row per evaluated market.
+            evidence_payload = dict(payload)
+            raw_signals = [
+                dict(row)
+                for row in (payload.get("signals") or [])
+                if isinstance(row, dict) and row.get("market")
+            ]
+            raw_by_market = {
+                str(row.get("market") or "").upper(): row
+                for row in raw_signals
+            }
+            buy_signals = [
+                row
+                for row in raw_signals
+                if str(row.get("side") or "").upper() == "BUY"
+            ]
+            buy_markets = {
+                str(row.get("market") or "").upper()
+                for row in buy_signals
+            }
+            evidence_signals = list(buy_signals)
+            for market in markets:
+                if market in buy_markets or market not in causal_primary:
+                    continue
+                screen_row = dict(screen.get(market) or {})
+                raw_row = dict(raw_by_market.get(market) or {})
+                evidence_signals.append(
+                    {
+                        "market": market,
+                        "side": "NO_TRADE",
+                        "score": float(
+                            raw_row.get(
+                                "score",
+                                screen_row.get(
+                                    "execution_adjusted_score",
+                                    screen_row.get(
+                                        "opportunity_score",
+                                        0.0,
+                                    ),
+                                ),
+                            )
+                            or 0.0
+                        ),
+                        "edge_bps": float(raw_row.get("edge_bps") or 0.0),
+                        "edge_source": "FULL_UNIVERSE_NO_TRADE",
+                        "votes": list(raw_row.get("votes") or []),
+                    }
+                )
+            evidence_payload["signals"] = evidence_signals
+            payload["forward_evidence"] = self.forward.append_cycle(
+                evidence_payload,
+                candle_times,
+            )
             if bool(forward_cfg.get("mature_on_cycle", True)):
                 horizons = tuple(int(value) for value in (forward_cfg.get("horizons_hours", [1, 4, 24]) or []) if int(value) > 0)
                 payload["forward_evidence"]["maturation"] = self.forward.mature_from_frames(
                     forward_frames, horizons_hours=horizons or (1, 4, 24), execution_timeframe=execution_tf
                 )
             payload["forward_evidence"]["ledger"] = self.forward.status()
+            payload["forward_evidence"]["coverage"] = (
+                self.forward.coverage_status()
+            )
             payload["forward_evidence"]["outcomes"] = self.forward.outcome_status()
+            payload["full_universe_evidence"] = {
+                "schema_version": "round43_full_universe_evidence_v1",
+                "requested_universe_markets": len(markets),
+                "screened_markets": len(causal_primary),
+                "fully_evaluated_markets": len(frames),
+                "forward_frame_markets": len(forward_frames),
+                "raw_pipeline_signal_markets": len(raw_by_market),
+                "actual_signal_markets": len(buy_markets),
+                "no_trade_markets_added": max(
+                    0,
+                    len(evidence_signals) - len(buy_signals),
+                ),
+                "agent_inference_markets": sum(
+                    bool(row.get("agent_preview"))
+                    for row in screen.values()
+                ),
+                "rl_inference_markets": sum(
+                    bool(row.get("rl_preview"))
+                    for row in screen.values()
+                ),
+                "decision_bucket_minutes": int(
+                    forward_cfg.get("decision_bucket_minutes", 15)
+                ),
+                "horizons_hours": list(horizons)
+                if bool(forward_cfg.get("mature_on_cycle", True))
+                else list(forward_cfg.get("horizons_hours", [])),
+                "no_trade_is_research_only": True,
+                "canary_uses_unblocked_buy_only": True,
+                "economic_optimizer_uses_closed_trades_only": True,
+                "automatic_live_authority": False,
+                "automatic_live_promotion": False,
+            }
         else:
             payload["forward_evidence"] = {"recorded": False, "ledger": self.forward.status(), "outcomes": self.forward.outcome_status()}
 

@@ -1,0 +1,36 @@
+[Unit]
+Description=CoinMarketCap 10-way WebSocket Collector
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sjagil/crypto-ai-swing-layer
+Environment=PYTHONUNBUFFERED=1
+Environment=CMC_STARTUP_ROOT=/mnt/data/quantdata/cmc-startup
+Environment=CMC_WS_CONNECTIONS=10
+Environment=CMC_WS_MAX_MARKETS=25
+Environment=CRYPTO_REPO_PATH=/home/pi/sjagil/crypto
+Environment=CRYPTO_SWING_PRODUCTION_MODE=shadow
+Environment=CRYPTO_SWING_CANARY_EXECUTE=NO
+Environment=CRYPTO_SWING_FULL_LIVE=NO
+Environment=CRYPTO_FULL_LIVE=NO
+ExecStart=/home/pi/sjagil/crypto-ai-swing-layer/.venv/bin/python /home/pi/sjagil/crypto-ai-swing-layer/scripts/cmc_websocket_10.py --markets-file /home/pi/sjagil/crypto-ai-swing-layer/output/crypto_ai_swing/universe/latest.json --root /mnt/data/quantdata/cmc-startup --connections 10 --max-markets 25
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+Nice=10
+CPUQuota=35%
+MemoryHigh=512M
+MemoryMax=1G
+LimitNOFILE=4096
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/mnt/data /home/pi/sjagil/crypto-ai-swing-layer/output
+
+[Install]
+WantedBy=multi-user.target

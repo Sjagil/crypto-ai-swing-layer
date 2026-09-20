@@ -1,0 +1,40 @@
+[Unit]
+Description=Crypto Swing 24/7 AI Learning Worker
+Wants=network-online.target
+After=network-online.target crypto-cmc-intelligence.service
+RequiresMountsFor=/mnt/data
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sjagil/crypto-ai-swing-layer
+Environment=PYTHONUNBUFFERED=1
+Environment=CMC_STARTUP_ROOT=/mnt/data/crypto/cmc-startup
+Environment=CRYPTO_REPO_PATH=/home/pi/sjagil/crypto
+Environment=CRYPTO_SWING_LEARNING_PROCESS=1
+Environment=CRYPTO_SWING_PRODUCTION_MODE=shadow
+Environment=CRYPTO_SWING_CANARY_EXECUTE=NO
+Environment=CRYPTO_SWING_FULL_LIVE=NO
+Environment=CRYPTO_FULL_LIVE=NO
+Environment=OMP_NUM_THREADS=3
+Environment=OPENBLAS_NUM_THREADS=3
+Environment=MKL_NUM_THREADS=3
+Environment=NUMEXPR_NUM_THREADS=3
+ExecStart=/home/pi/sjagil/crypto-ai-swing-layer/.venv/bin/python /home/pi/sjagil/crypto-ai-swing-layer/scripts/pi_learning_worker.py --mode shadow --poll-seconds 60
+Restart=always
+RestartSec=15
+TimeoutStopSec=120
+KillSignal=SIGTERM
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=300%
+MemoryHigh=6G
+MemoryMax=9G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/pi/sjagil/crypto-ai-swing-layer/output /home/pi/sjagil/crypto/output /mnt/data
+
+[Install]
+WantedBy=multi-user.target

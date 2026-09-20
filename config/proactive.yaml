@@ -33,7 +33,7 @@ active_swing:
   execution_validation_canary:
     enabled: true
     manual_authority_required: true
-    maximum_order_eur: 25.0
+    maximum_order_eur: 10.0
     minimum_signal_score: 0.74
     minimum_mtf_score: 0.0
     minimum_orderflow_score: -0.35
@@ -41,7 +41,7 @@ active_swing:
     prospective_evidence_required_for_scaling: true
     alpha_evidence_authorized: false
     autoscale: false
-deep_scan_limit: 12
+deep_scan_limit: 25
 screen_spread_quality_scale_bps: 15
 screen_concurrency: 6
 rally_capture:
@@ -84,3 +84,10 @@ timeframe_pipeline:
   weekly_bullish_confirmation_score: 0.45
   minimum_macro_score_for_long: 0.0
   minimum_trend_score_for_long: 0.0
+full_live:
+  enabled: true
+  require_calibrated_edge: true
+  require_canonical_preflight: true
+  require_post_submit_reconciliation: true
+  position_sizing: CANONICAL_RISK_KELLY_CORRELATION_COST
+  tiny_canary_cap: false
